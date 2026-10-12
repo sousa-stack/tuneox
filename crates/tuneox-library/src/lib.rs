@@ -1,6 +1,6 @@
 //! The TuneOx library: tracks, cues, beat grids and playlists in SQLite.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Row, ToSql, Transaction, params};
@@ -66,6 +66,15 @@ impl Library {
             std::fs::create_dir_all(dir)?;
         }
         Self::init(Connection::open(path)?)
+    }
+
+    /// Where the library lives unless told otherwise: `$TUNEOX_LIBRARY`, else
+    /// `TuneOx/library.db` in the OS data folder
+    /// (`~/Library/Application Support` on macOS).
+    pub fn default_path() -> Option<PathBuf> {
+        std::env::var_os("TUNEOX_LIBRARY")
+            .map(PathBuf::from)
+            .or_else(|| dirs::data_dir().map(|d| d.join("TuneOx").join("library.db")))
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -246,6 +255,22 @@ impl Library {
         let mut stmt = self.conn.prepare(&sql)?;
         let params: Vec<&dyn ToSql> = args.iter().map(|a| a.as_ref()).collect();
         let rows = stmt.query_map(params.as_slice(), track_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn playlist(&self, id: PlaylistId) -> Result<Option<Playlist>> {
+        Ok(self
+            .playlists()?
+            .into_iter()
+            .find(|playlist| playlist.id == id))
+    }
+
+    /// Tracks in ID order, a page at a time.
+    pub fn tracks(&self, offset: u32, limit: u32) -> Result<Vec<Track>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {TRACK_COLUMNS} FROM track ORDER BY id LIMIT ?1 OFFSET ?2"
+        ))?;
+        let rows = stmt.query_map([limit, offset], track_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

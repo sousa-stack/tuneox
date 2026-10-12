@@ -182,3 +182,87 @@ impl Command for GetTrack {
         })
     }
 }
+
+pub struct ListTracks;
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListTracksInput {
+    /// Skip this many tracks (tracks are in ID order).
+    pub offset: Option<u32>,
+    /// Page size (default 100, at most 10000).
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ListTracksOutput {
+    pub tracks: Vec<Track>,
+    /// Total number of tracks in the library.
+    pub total: u64,
+}
+
+impl Command for ListTracks {
+    const NAME: &'static str = "list_tracks";
+    const DESCRIPTION: &'static str = "Lists every track in the library a page at a time, in ID order. To find specific tracks, search_tracks is usually better.";
+    const EFFECT: Effect = Effect::Read;
+    type Input = ListTracksInput;
+    type Output = ListTracksOutput;
+
+    fn run(ctx: &mut Context, input: ListTracksInput) -> Result<ListTracksOutput> {
+        let limit = input.limit.unwrap_or(100).clamp(1, 10_000);
+        Ok(ListTracksOutput {
+            tracks: ctx.library.tracks(input.offset.unwrap_or(0), limit)?,
+            total: ctx.library.summary()?.tracks,
+        })
+    }
+}
+
+pub struct GetPlaylist;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetPlaylistInput {
+    pub id: PlaylistId,
+    /// Include full track details (default true). With false, only
+    /// `track_ids` is returned.
+    pub include_tracks: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GetPlaylistOutput {
+    pub playlist: Playlist,
+    /// Track IDs in playlist order. A track can appear more than once.
+    pub track_ids: Vec<TrackId>,
+    /// The tracks in playlist order, unless `include_tracks` was false.
+    pub tracks: Option<Vec<Track>>,
+}
+
+impl Command for GetPlaylist {
+    const NAME: &'static str = "get_playlist";
+    const DESCRIPTION: &'static str = "One playlist or folder with its tracks in playlist order.";
+    const EFFECT: Effect = Effect::Read;
+    type Input = GetPlaylistInput;
+    type Output = GetPlaylistOutput;
+
+    fn run(ctx: &mut Context, input: GetPlaylistInput) -> Result<GetPlaylistOutput> {
+        let playlist = ctx
+            .library
+            .playlist(input.id)?
+            .ok_or_else(|| Error::NotFound(format!("playlist {}", input.id)))?;
+        let track_ids = ctx.library.playlist_tracks(input.id)?;
+        let tracks = if input.include_tracks.unwrap_or(true) {
+            let mut tracks = Vec::with_capacity(track_ids.len());
+            for &id in &track_ids {
+                tracks.extend(ctx.library.track(id)?);
+            }
+            Some(tracks)
+        } else {
+            None
+        };
+        Ok(GetPlaylistOutput {
+            playlist,
+            track_ids,
+            tracks,
+        })
+    }
+}

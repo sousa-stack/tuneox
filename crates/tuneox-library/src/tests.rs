@@ -259,3 +259,21 @@ fn reopens_an_existing_library() {
     let lib = crate::Library::open(&path).unwrap();
     assert_eq!(lib.summary().unwrap().tracks, 1);
 }
+
+#[test]
+fn pages_through_tracks_and_finds_playlists() {
+    let lib = seeded();
+    let first = lib.tracks(0, 2).unwrap();
+    let rest = lib.tracks(2, 2).unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(rest.len(), 1);
+    assert!(
+        first[0].id < first[1].id && first[1].id < rest[0].id,
+        "ID order"
+    );
+
+    let playlists = lib.playlists().unwrap();
+    let set = lib.playlist(playlists[1].id).unwrap().unwrap();
+    assert_eq!((set.name.as_str(), set.track_count), ("10-9-26", 3));
+    assert!(lib.playlist(9999).unwrap().is_none());
+}

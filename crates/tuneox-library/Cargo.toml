@@ -9,6 +9,7 @@ homepage.workspace = true
 publish = false
 
 [dependencies]
+dirs.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
 tuneox-core.workspace = true

@@ -9,10 +9,9 @@
 //! - **Legacy** (`2025-11-25` and earlier): an `initialize` handshake
 //!   negotiates the version; results have no `resultType`.
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 use tuneox_commands::{Context, Effect};
@@ -42,12 +41,12 @@ dry_run first.";
 
 /// Serves MCP requests read line by line from `input`, writing responses
 /// and notifications to `output`, until `input` ends. Returns `output`.
-pub fn serve<R: BufRead, W: Write + 'static>(
+pub fn serve<R: BufRead, W: Write + Send + 'static>(
     ctx: &mut Context,
     input: R,
     output: W,
 ) -> io::Result<W> {
-    let out = Rc::new(RefCell::new(output));
+    let out = Arc::new(Mutex::new(output));
     let server = Server::new();
     for line in input.lines() {
         let line = line?;
@@ -60,9 +59,10 @@ pub fn serve<R: BufRead, W: Write + 'static>(
     }
     // Drop any progress handler still holding the writer.
     ctx.set_progress(|_| {});
-    let out = Rc::try_unwrap(out)
+    let out = Arc::try_unwrap(out)
         .map_err(|_| io::Error::other("MCP output still in use"))?
-        .into_inner();
+        .into_inner()
+        .map_err(|_| io::Error::other("MCP output lock poisoned"))?;
     Ok(out)
 }
 
@@ -102,7 +102,7 @@ impl Server {
         &self,
         ctx: &mut Context,
         line: &str,
-        out: &Rc<RefCell<impl Write + 'static>>,
+        out: &Arc<Mutex<impl Write + Send + 'static>>,
     ) -> Option<Value> {
         let message: Value = match serde_json::from_str(line) {
             Ok(message) => message,
@@ -139,7 +139,7 @@ impl Server {
         id: Value,
         method: &str,
         params: Option<&Value>,
-        out: &Rc<RefCell<impl Write + 'static>>,
+        out: &Arc<Mutex<impl Write + Send + 'static>>,
     ) -> Value {
         let params = params.cloned().unwrap_or_else(|| json!({}));
         let meta = params.get("_meta");
@@ -199,7 +199,7 @@ impl Server {
         &self,
         ctx: &mut Context,
         params: &Value,
-        out: &Rc<RefCell<impl Write + 'static>>,
+        out: &Arc<Mutex<impl Write + Send + 'static>>,
     ) -> Result<Value, Failure> {
         let name = params
             .get("name")
@@ -214,7 +214,7 @@ impl Server {
             .unwrap_or_else(|| json!({}));
 
         if let Some(token) = params.pointer("/_meta/progressToken").cloned() {
-            let out = Rc::clone(out);
+            let out = Arc::clone(out);
             let mut sent = 0u64;
             ctx.set_progress(move |p| {
                 // Progress must increase on every notification, and stages
@@ -316,8 +316,10 @@ fn error(id: Value, code: i64, message: String) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-fn write_message(out: &Rc<RefCell<impl Write>>, message: &Value) -> io::Result<()> {
-    let mut out = out.borrow_mut();
+fn write_message(out: &Mutex<impl Write>, message: &Value) -> io::Result<()> {
+    let mut out = out
+        .lock()
+        .map_err(|_| io::Error::other("MCP output lock poisoned"))?;
     serde_json::to_writer(&mut *out, message)?;
     out.write_all(b"\n")?;
     out.flush()

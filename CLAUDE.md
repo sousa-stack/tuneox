@@ -48,7 +48,10 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo fmt --all
 cd apps/desktop && bun install && bun run tauri dev   # run the desktop app
+cd apps/desktop && bun run tauri build --bundles app  # → target/release/bundle/macos/TuneOx.app
 ```
+
+The desktop app, CLI and MCP server all open the library at `$TUNEOX_LIBRARY` if set, else `~/Library/Application Support/TuneOx/library.db` (the user's real one). Point them at a scratch library under `.re/` when testing, e.g. `TUNEOX_LIBRARY=$PWD/.re/tuneox-test-library.db bun run tauri dev` from `apps/desktop`, or `open --env TUNEOX_LIBRARY=… TuneOx.app`. The UI talks to the core only through the `run_command` Tauri command (`apps/desktop/src-tauri/src/lib.rs`), which runs registry commands; don't add bespoke Tauri commands.
 
 The rekordbox database keys (`TUNEOX_MASTERDB_KEY`, `TUNEOX_ONELIBRARY_KEY`) are compiled in by `crates/tuneox-pioneer/build.rs`, from the environment or from the gitignored `.keys.env` at the repo root. CI and release builds get them from GitHub Actions secrets. Never write the key values into source, docs or commit messages.
 

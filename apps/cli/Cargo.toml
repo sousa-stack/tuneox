@@ -14,7 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-dirs.workspace = true
 serde_json.workspace = true
 tuneox-commands.workspace = true
 tuneox-library.workspace = true

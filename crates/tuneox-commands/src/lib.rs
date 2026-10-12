@@ -19,8 +19,9 @@ use tuneox_library::Library;
 
 pub use import_rekordbox::{ImportCounts, ImportRekordbox, ImportRekordboxInput, ImportReport};
 pub use library::{
-    GetTrack, GetTrackInput, GetTrackOutput, GridSummary, LibrarySummary, LibrarySummaryOutput,
-    ListPlaylists, ListPlaylistsOutput, NoInput, SearchTracks, SearchTracksInput,
+    GetPlaylist, GetPlaylistInput, GetPlaylistOutput, GetTrack, GetTrackInput, GetTrackOutput,
+    GridSummary, LibrarySummary, LibrarySummaryOutput, ListPlaylists, ListPlaylistsOutput,
+    ListTracks, ListTracksInput, ListTracksOutput, NoInput, SearchTracks, SearchTracksInput,
     SearchTracksOutput,
 };
 
@@ -62,7 +63,7 @@ pub struct Context {
     pub library: Library,
     /// Where the library lives on disk, if it isn't in memory.
     pub library_path: Option<PathBuf>,
-    progress: Box<dyn FnMut(&Progress)>,
+    progress: Box<dyn FnMut(&Progress) + Send>,
 }
 
 impl Context {
@@ -74,14 +75,14 @@ impl Context {
         }
     }
 
-    pub fn on_progress(mut self, report: impl FnMut(&Progress) + 'static) -> Self {
+    pub fn on_progress(mut self, report: impl FnMut(&Progress) + Send + 'static) -> Self {
         self.set_progress(report);
         self
     }
 
     /// Replaces the progress handler, e.g. to route one call's progress to
     /// the client that made it.
-    pub fn set_progress(&mut self, report: impl FnMut(&Progress) + 'static) {
+    pub fn set_progress(&mut self, report: impl FnMut(&Progress) + Send + 'static) {
         self.progress = Box::new(report);
     }
 
@@ -172,7 +173,9 @@ macro_rules! registry {
 registry![
     LibrarySummary,
     ListPlaylists,
+    GetPlaylist,
     SearchTracks,
+    ListTracks,
     GetTrack,
     ImportRekordbox,
 ];

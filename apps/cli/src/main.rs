@@ -22,7 +22,7 @@ use tuneox_library::Library;
 )]
 struct Cli {
     /// Library database to use. Defaults to $TUNEOX_LIBRARY, then the
-    /// standard location for this OS.
+    /// standard location for this OS (shared with the desktop app).
     #[arg(long, global = true)]
     library: Option<PathBuf>,
     /// Print raw JSON output.
@@ -117,8 +117,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let library_path = cli
         .library
-        .or_else(|| std::env::var_os("TUNEOX_LIBRARY").map(PathBuf::from))
-        .or_else(|| dirs::data_dir().map(|d| d.join("TuneOx").join("library.db")))
+        .or_else(Library::default_path)
         .ok_or("no default library location; pass --library")?;
     let library = Library::open(&library_path)?;
     let mut ctx = Context::new(library, Some(library_path)).on_progress(show_progress);
