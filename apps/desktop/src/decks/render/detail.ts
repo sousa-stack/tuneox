@@ -100,9 +100,9 @@ export class DetailView {
     const bottom = top + g.lane;
     const up = i === 0; // deck A grows up from its baseline at the lane's bottom
     const state = lane.state;
-    if (state.track_id == null || lane.message) {
-      this.message(lane.message ?? (i === 0 ? "Deck A: drag a track here" : "Deck B: drag a track here"), top, g.lane);
-      if (state.track_id == null) return;
+    if (state.track_id == null) {
+      this.message(i === 0 ? "Deck A: drag a track here" : "Deck B: drag a track here", top, g.lane);
+      return;
     }
     const pxPerUs = this.pxPerUs(span, state);
     const cx = g.centerX;
@@ -130,6 +130,7 @@ export class DetailView {
         cache.tile(key, ahead, wf, cpp, g.lane, up);
       }
     }
+    if (lane.message) this.message(lane.message, top, g.lane);
 
     const tMin = lane.position - cx / pxPerUs;
     const tMax = lane.position + (g.width - cx) / pxPerUs;
