@@ -11,17 +11,18 @@ use tuneox_core::{BeatGrid, Cue, TrackId};
 
 use crate::core::{Control, Core, Garbage, MixerUpdate, Snapshot};
 use crate::deck::{
-    HOT_CUES, HotCue, LoadedTrack, Loop, MAX_BPM, MAX_LOOP_BEATS, MEMORY_CUES, MIN_BPM,
-    MIN_LOOP_BEATS, MemoryTarget,
+    HOT_CUES, HotCue, LoadedTrack, Loop, MAX_BPM, MAX_LOOP_BEATS, MAX_SAVED_MEMORY_CUES,
+    MEMORY_CUES, MIN_BPM, MIN_LOOP_BEATS, MemoryTarget, ScrubPhase,
 };
 use crate::events::EventPump;
 use crate::grid::Grid;
-use crate::mixer::MixerSettings;
+use crate::mixer::{AUTO_GAIN_MAX_DB, AUTO_GAIN_MIN_DB, MixerSettings};
 use crate::output::{self, OutputMessage};
 use crate::pcm::TrackPcm;
+use crate::preview::PreviewTrack;
 use crate::state::{
     BendDirection, ChannelState, DeckState, EngineEvent, HotCueState, LoopState, MemoryCueState,
-    MixerState, OutputInfo, PlayerStatus, SyncMode,
+    MixerState, OutputInfo, PlayerStatus, PreviewState, SyncMode, SyncPhase,
 };
 use crate::{Error, Result};
 
@@ -38,6 +39,10 @@ pub const OFFLINE_SAMPLE_RATE: u32 = 48_000;
 
 /// Valid tempo fader ranges in percent (100 = WIDE).
 pub const TEMPO_RANGES: [f64; 4] = [6.0, 10.0, 16.0, 100.0];
+
+/// Quantize resolutions in beats (rekordbox EXPORT's "Quantize Beat Value":
+/// 1/8, 1/4, 1/2, 1 beat).
+pub const QUANTIZE_BEAT_VALUES: [f64; 4] = [0.125, 0.25, 0.5, 1.0];
 
 /// Where a deck's audio comes from.
 #[derive(Debug, Clone)]
@@ -70,6 +75,30 @@ pub struct LoadRequest {
     pub auto_gain_db: Option<f32>,
 }
 
+/// A track for the browser's preview player.
+#[derive(Debug, Clone)]
+pub struct PreviewRequest {
+    pub track_id: Option<TrackId>,
+    pub source: Source,
+    /// Where to start, in microseconds from the start of the track.
+    pub position_us: i64,
+    /// Helps size decode storage for files that don't state their length.
+    pub duration_secs: Option<f64>,
+    /// The track's auto gain; 0 dB if `None`.
+    pub auto_gain_db: Option<f32>,
+}
+
+/// What a scrub command does (`deck_scrub`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrubAction {
+    /// Hand on the record: a playing deck slows to a stop unless dragged.
+    Start,
+    /// Drag to a position.
+    Move,
+    /// Let go: play on if the deck was playing, else rest there.
+    End,
+}
+
 /// The audio engine: two decks and a mixer. Cheap to clone; every clone
 /// controls the same engine, which stops when the last one is dropped.
 #[derive(Clone)]
@@ -96,6 +125,24 @@ struct DeckMeta {
     path: Option<PathBuf>,
     pcm: Option<Arc<TrackPcm>>,
     has_grid: bool,
+    /// Colour and comment of the library cues loaded with the track, by
+    /// [`HotCue::tag`] − 1. Strings stay here, off the audio thread.
+    cue_meta: Vec<CueMeta>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CueMeta {
+    color: Option<u8>,
+    comment: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct PreviewMeta {
+    pub load_id: u64,
+    track_id: Option<TrackId>,
+    path: Option<PathBuf>,
+    pcm: Option<Arc<TrackPcm>>,
+    gain_db: f32,
 }
 
 type EventHandler = Box<dyn Fn(&EngineEvent) + Send>;
@@ -106,6 +153,7 @@ pub(crate) struct Shared {
     state: Mutex<triple_buffer::Output<Snapshot>>,
     garbage: Mutex<rtrb::Consumer<Garbage>>,
     decks: Mutex<[DeckMeta; 2]>,
+    pub preview: Mutex<PreviewMeta>,
     pub clock: Clock,
     pub output_info: Mutex<Option<OutputInfo>>,
     /// Output latency the device last reported, in microseconds.
@@ -137,6 +185,7 @@ impl Shared {
             state: Mutex::new(state_rx),
             garbage: Mutex::new(garbage_rx),
             decks: Mutex::new(Default::default()),
+            preview: Mutex::new(PreviewMeta::default()),
             clock,
             output_info: Mutex::new(None),
             latency_us: AtomicU64::new(0),
@@ -169,8 +218,9 @@ impl Shared {
         let snapshot = self.snapshot();
         let decks = [self.deck_state(&snapshot, 0), self.deck_state(&snapshot, 1)];
         let mixer = mixer_state(&snapshot.mixer);
+        let preview = self.preview_state(&snapshot);
         let now = self.now_ms();
-        let events = lock(&self.pump).poll(&snapshot, decks, mixer, now);
+        let events = lock(&self.pump).poll(&snapshot, decks, mixer, preview, now);
         if !events.is_empty()
             && let Some(handler) = lock(&self.handler).as_ref()
         {
@@ -224,15 +274,29 @@ impl Shared {
         state.active_loop = s.active_loop.map(|lp| loop_state(lp, s.active_loop_beats));
         state.last_loop = s.last_loop.map(|lp| loop_state(lp, s.last_loop_beats));
         state.loop_in_us = s.loop_in.map(us);
+        state.scrubbing = s.scrubbing;
+        // Colours and comments join the cues here, off the audio thread.
+        let info = |cue: &HotCue| {
+            (cue.tag as usize)
+                .checked_sub(1)
+                .and_then(|i| meta.cue_meta.get(i))
+                .cloned()
+                .unwrap_or_default()
+        };
         state.memory_cues = s
             .memory_cues
             .iter()
             .flatten()
             .enumerate()
-            .map(|(index, cue)| MemoryCueState {
-                index: index as u8,
-                start_us: us(cue.start),
-                end_us: cue.end.map(us),
+            .map(|(index, cue)| {
+                let CueMeta { color, comment } = info(cue);
+                MemoryCueState {
+                    index: index as u8,
+                    start_us: us(cue.start),
+                    end_us: cue.end.map(us),
+                    color,
+                    comment,
+                }
             })
             .collect();
         state.hot_cues = s
@@ -240,14 +304,124 @@ impl Shared {
             .iter()
             .enumerate()
             .filter_map(|(slot, cue)| {
-                cue.map(|cue| HotCueState {
-                    slot: slot as u8,
-                    start_us: us(cue.start),
-                    end_us: cue.end.map(us),
+                cue.map(|cue| {
+                    let CueMeta { color, comment } = info(&cue);
+                    HotCueState {
+                        slot: slot as u8,
+                        start_us: us(cue.start),
+                        end_us: cue.end.map(us),
+                        color,
+                        comment,
+                    }
                 })
             })
             .collect();
         state
+    }
+
+    fn preview_state(&self, snapshot: &Snapshot) -> PreviewState {
+        let meta = lock(&self.preview);
+        let s = &snapshot.preview;
+        let mut state = PreviewState::idle();
+        state.at_ms = snapshot.at_ms;
+        let Some(pcm) = meta.pcm.as_ref() else {
+            return state;
+        };
+        state.track_id = meta.track_id;
+        state.loading = !pcm.is_done();
+        state.error = pcm.error().map(str::to_string);
+        state.duration_us = (pcm.duration_secs() * 1e6).round() as i64;
+        state.auto_gain_db = meta.gain_db;
+        if s.load_id != meta.load_id {
+            // The audio thread hasn't taken the new track yet.
+            state.loading = true;
+            return state;
+        }
+        state.playing = s.playing;
+        state.position_us = (s.position * 1e6).round() as i64;
+        state.rate = if s.playing && !s.stalled { 1.0 } else { 0.0 };
+        state
+    }
+}
+
+/// Hot cues by slot and memory cues in position order from library cues,
+/// tagged with their index + 1 in the returned colour/comment table.
+fn cue_tables(
+    cues: &[Cue],
+) -> (
+    [Option<HotCue>; HOT_CUES],
+    [Option<HotCue>; MEMORY_CUES],
+    Vec<CueMeta>,
+) {
+    let mut meta = Vec::with_capacity(cues.len());
+    let mut tagged = |c: &Cue| {
+        meta.push(CueMeta {
+            color: c.color,
+            comment: c.comment.clone(),
+        });
+        let start = c.start_us.max(0) as f64 / 1e6;
+        HotCue {
+            start,
+            end: c.end_us.map(|e| e as f64 / 1e6).filter(|&e| e > start),
+            tag: meta.len() as u32,
+        }
+    };
+    let mut hot_cues = [None; HOT_CUES];
+    let mut memory: Vec<HotCue> = Vec::new();
+    for c in cues {
+        match c.hot_cue {
+            Some(slot) if (slot as usize) < HOT_CUES => hot_cues[slot as usize] = Some(tagged(c)),
+            Some(_) => {}
+            None => memory.push(tagged(c)),
+        }
+    }
+    memory.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut memory_cues = [None; MEMORY_CUES];
+    for (slot, cue) in memory_cues.iter_mut().zip(memory) {
+        *slot = Some(cue);
+    }
+    (hot_cues, memory_cues, meta)
+}
+
+/// Audio of `path` the engine already holds (decoded or decoding) on a deck
+/// or in the preview player, so loading it again is instant.
+fn already_decoded<'a>(
+    path: Option<&std::path::Path>,
+    sources: impl IntoIterator<Item = (&'a Option<PathBuf>, &'a Option<Arc<TrackPcm>>)>,
+) -> Option<Arc<TrackPcm>> {
+    let path = path?;
+    sources.into_iter().find_map(|(p, pcm)| {
+        pcm.as_ref()
+            .filter(|pcm| p.as_deref() == Some(path) && !pcm.cancelled() && pcm.error().is_none())
+            .cloned()
+    })
+}
+
+/// Starts decoding a source (or wraps generated samples).
+fn decode_source(source: &Source, duration_secs: Option<f64>) -> Arc<TrackPcm> {
+    match source {
+        Source::File(path) => {
+            let pcm = Arc::new(TrackPcm::default());
+            crate::decode::spawn(path.clone(), pcm.clone(), duration_secs);
+            pcm
+        }
+        Source::Samples {
+            sample_rate,
+            channels,
+            samples,
+        } => Arc::new(TrackPcm::from_samples(*sample_rate, *channels, samples)),
+    }
+}
+
+/// A deck cue as a library cue (no colour or comment: stored on the deck).
+fn library_cue(cue: &HotCue, hot_cue: Option<u8>) -> Cue {
+    let us = |seconds: f64| (seconds * 1e6).round() as i64;
+    Cue {
+        hot_cue,
+        start_us: us(cue.start),
+        end_us: cue.end.map(us),
+        color: None,
+        comment: None,
     }
 }
 
@@ -448,6 +622,13 @@ impl Engine {
             ],
             mixer: mixer_state(&snapshot.mixer),
             hot_cue_gate: snapshot.hot_cue_gate,
+            quantize_beats: snapshot.quantize_beats,
+            sync_phase: if snapshot.sync_bars {
+                SyncPhase::Bar
+            } else {
+                SyncPhase::Beat
+            },
+            preview: shared.preview_state(&snapshot),
             output: self.output(),
         }
     }
@@ -469,7 +650,7 @@ impl Engine {
             .as_ref()
             .and_then(|g| Grid::from_beats(&g.beats))
             .or_else(|| request.bpm.and_then(|bpm| Grid::constant(0.0, bpm)));
-        let (hot_cues, memory_cues) = cue_tables(&request.cues);
+        let (hot_cues, memory_cues, cue_meta) = cue_tables(&request.cues);
 
         let (pcm, load_id) = {
             let mut decks = lock(&shared.decks);
@@ -477,30 +658,21 @@ impl Engine {
                 Source::File(path) => Some(path.clone()),
                 Source::Samples { .. } => None,
             };
-            let other = &decks[1 - index];
-            let reuse = other
-                .pcm
-                .clone()
-                .filter(|_| path.is_some() && other.path == path && other.pcm.is_some());
-            let pcm = match reuse {
-                Some(pcm) => pcm,
-                None => match &request.source {
-                    Source::File(path) => {
-                        let pcm = Arc::new(TrackPcm::default());
-                        crate::decode::spawn(path.clone(), pcm.clone(), request.duration_secs);
-                        pcm
-                    }
-                    Source::Samples {
-                        sample_rate,
-                        channels,
-                        samples,
-                    } => Arc::new(TrackPcm::from_samples(*sample_rate, *channels, samples)),
-                },
+            let (pcm, preview_pcm) = {
+                let preview = lock(&shared.preview);
+                let sources = decks
+                    .iter()
+                    .map(|d| (&d.path, &d.pcm))
+                    .chain([(&preview.path, &preview.pcm)]);
+                let pcm = already_decoded(path.as_deref(), sources)
+                    .unwrap_or_else(|| decode_source(&request.source, request.duration_secs));
+                (pcm, preview.pcm.clone())
             };
             let other_pcm = decks[1 - index].pcm.clone();
             let meta = &mut decks[index];
             if let Some(old) = meta.pcm.take()
                 && !other_pcm.as_ref().is_some_and(|o| Arc::ptr_eq(o, &old))
+                && !preview_pcm.as_ref().is_some_and(|o| Arc::ptr_eq(o, &old))
                 && !Arc::ptr_eq(&old, &pcm)
             {
                 old.cancel();
@@ -510,6 +682,7 @@ impl Engine {
             meta.path = path;
             meta.pcm = Some(pcm.clone());
             meta.has_grid = grid.is_some();
+            meta.cue_meta = cue_meta;
             (pcm, meta.load_id)
         };
 
@@ -602,6 +775,177 @@ impl Engine {
             MemoryCueTarget::Previous => MemoryTarget::Previous,
         };
         self.on_track(deck, |deck| Control::MemoryCue { deck, target })
+    }
+
+    /// Clears hot cue `slot` (0 = A … 7 = H). Returns the state and the cue
+    /// that was there (as a library cue), or `None` if the pad was empty.
+    pub fn hot_cue_delete(&self, deck: u8, slot: u8) -> Result<(DeckState, Option<Cue>)> {
+        let index = self.require_track(deck)?;
+        let removed = self.inner.shared.snapshot().decks[index]
+            .hot_cues
+            .get(slot as usize)
+            .ok_or_else(|| {
+                Error::InvalidInput(format!("hot cue slot must be 0–7 (A–H), not {slot}"))
+            })?
+            .map(|cue| library_cue(&cue, Some(slot)));
+        let slot = slot as usize;
+        self.send(Control::HotCueDelete { deck: index, slot })?;
+        Ok((self.deck(deck)?, removed))
+    }
+
+    /// MEMORY: saves the active loop, else the last loop if it was set after
+    /// the cue point, else the cue point, as a memory cue or loop. Returns
+    /// the state and the cue added (as a library cue), or `None` if the same
+    /// one was already there. Refused with nothing to save or when the track
+    /// already has [`MAX_SAVED_MEMORY_CUES`].
+    pub fn memory_cue_set(&self, deck: u8) -> Result<(DeckState, Option<Cue>)> {
+        let index = self.require_track(deck)?;
+        let snapshot = self.inner.shared.snapshot().decks[index];
+        let candidate = snapshot.memory_candidate.ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "deck {deck} has no cue point or loop to save: set a cue point or a loop first"
+            ))
+        })?;
+        let existing: Vec<HotCue> = snapshot.memory_cues.iter().flatten().copied().collect();
+        if existing.iter().any(|c| c.same_place(&candidate)) {
+            return Ok((self.deck(deck)?, None));
+        }
+        if existing.len() >= MAX_SAVED_MEMORY_CUES {
+            return Err(Error::InvalidInput(format!(
+                "deck {deck}'s track already has {} memory cues, the most rekordbox allows; delete one first",
+                existing.len()
+            )));
+        }
+        self.send(Control::MemoryCueSet(index))?;
+        Ok((self.deck(deck)?, Some(library_cue(&candidate, None))))
+    }
+
+    /// Deletes memory cue `index` (position order, as in `memory_cues`).
+    /// Returns the state and the cue removed (as a library cue).
+    pub fn memory_cue_delete(&self, deck: u8, index: u8) -> Result<(DeckState, Cue)> {
+        let d = self.require_track(deck)?;
+        let snapshot = self.inner.shared.snapshot().decks[d];
+        let mut cues = snapshot.memory_cues.iter().flatten();
+        let count = cues.clone().count();
+        let cue = cues.nth(index as usize).copied().ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "deck {deck}'s track has {count} memory cues; there's no index {index}"
+            ))
+        })?;
+        self.send(Control::MemoryCueDelete {
+            deck: d,
+            index: index as usize,
+        })?;
+        Ok((self.deck(deck)?, library_cue(&cue, None)))
+    }
+
+    /// Scrubs a deck like a record moved by hand: `Start` (optionally at a
+    /// position), `Move` to a position, `End` (optionally at a final
+    /// position). The audio follows smoothly (speed from the target over
+    /// time, smoothed, no fades); on `End` the deck plays on if it was
+    /// playing, else rests at the position.
+    pub fn scrub(
+        &self,
+        deck: u8,
+        action: ScrubAction,
+        position_us: Option<i64>,
+    ) -> Result<DeckState> {
+        let seconds = position_us.map(|p| p.max(0) as f64 / 1e6);
+        let phase = match action {
+            ScrubAction::Start => ScrubPhase::Start,
+            ScrubAction::Move => ScrubPhase::Move,
+            ScrubAction::End => ScrubPhase::End,
+        };
+        self.on_track(deck, |deck| Control::Scrub {
+            deck,
+            phase,
+            seconds,
+        })
+    }
+
+    /// Previews a track from a position at its own auto gain, through the
+    /// master output; any playing deck pauses. Previewing the same track
+    /// again only moves the playhead. Returns at once while the file
+    /// decodes; it plays as soon as the audio is there.
+    pub fn preview_play(&self, request: PreviewRequest) -> Result<PreviewState> {
+        let shared = &self.inner.shared;
+        let gain_db = request
+            .auto_gain_db
+            .unwrap_or(0.0)
+            .clamp(AUTO_GAIN_MIN_DB, AUTO_GAIN_MAX_DB);
+        let seconds = request.position_us.max(0) as f64 / 1e6;
+        let path = match &request.source {
+            Source::File(path) => Some(path.clone()),
+            Source::Samples { .. } => None,
+        };
+        let track = {
+            let decks = lock(&shared.decks);
+            let mut preview = lock(&shared.preview);
+            let same = path.is_some()
+                && preview.path == path
+                && preview.track_id == request.track_id
+                && preview.gain_db == gain_db
+                && preview.pcm.as_ref().is_some_and(|p| p.error().is_none());
+            if same {
+                None
+            } else {
+                let pcm = {
+                    let sources = decks
+                        .iter()
+                        .map(|d| (&d.path, &d.pcm))
+                        .chain([(&preview.path, &preview.pcm)]);
+                    already_decoded(path.as_deref(), sources)
+                        .unwrap_or_else(|| decode_source(&request.source, request.duration_secs))
+                };
+                if let Some(old) = preview.pcm.take()
+                    && !Arc::ptr_eq(&old, &pcm)
+                    && !decks
+                        .iter()
+                        .any(|d| d.pcm.as_ref().is_some_and(|p| Arc::ptr_eq(p, &old)))
+                {
+                    old.cancel();
+                }
+                preview.load_id += 1;
+                preview.track_id = request.track_id;
+                preview.path = path;
+                preview.pcm = Some(pcm.clone());
+                preview.gain_db = gain_db;
+                Some(PreviewTrack {
+                    load_id: preview.load_id,
+                    pcm,
+                    gain_db,
+                })
+            }
+        };
+        self.send(Control::PreviewPlay { track, seconds })?;
+        Ok(self.preview())
+    }
+
+    /// Stops the preview player (with a short fade).
+    pub fn preview_stop(&self) -> Result<PreviewState> {
+        self.send(Control::PreviewStop)?;
+        Ok(self.preview())
+    }
+
+    /// The preview player's state.
+    pub fn preview(&self) -> PreviewState {
+        let shared = &self.inner.shared;
+        shared.preview_state(&shared.snapshot())
+    }
+
+    /// Waits until the previewed track has finished decoding (or failed).
+    pub fn wait_until_preview_loaded(&self, timeout: Duration) -> Result<PreviewState> {
+        let started = Instant::now();
+        loop {
+            let pcm = lock(&self.inner.shared.preview).pcm.clone();
+            if pcm.is_none_or(|p| p.is_done()) {
+                return Ok(self.preview());
+            }
+            if started.elapsed() > timeout {
+                return Err(Error::NotResponding);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     pub fn seek(&self, deck: u8, position_us: i64) -> Result<DeckState> {
@@ -762,6 +1106,28 @@ impl Engine {
         Ok(self.status())
     }
 
+    /// Quantize resolution for both decks, in beats: one of
+    /// [`QUANTIZE_BEAT_VALUES`] (rekordbox EXPORT's "Quantize Beat Value").
+    /// With quantize on, cue set, loop in/out, hot cue store and auto loop
+    /// starts snap to it, and hot cue jumps keep the phase at it. Beat jump
+    /// sizes don't change.
+    pub fn set_quantize_beats(&self, beats: f64) -> Result<PlayerStatus> {
+        if !QUANTIZE_BEAT_VALUES.contains(&beats) {
+            return Err(Error::InvalidInput(format!(
+                "quantize value must be 0.125, 0.25, 0.5 or 1 beat, not {beats}"
+            )));
+        }
+        self.send(Control::QuantizeBeats(beats))?;
+        Ok(self.status())
+    }
+
+    /// What beat sync aligns: the beat (rekordbox) or the bar, downbeat to
+    /// downbeat (a TuneOx extra; bar sync moves a deck at most half a bar).
+    pub fn set_sync_phase(&self, phase: SyncPhase) -> Result<PlayerStatus> {
+        self.send(Control::SyncBars(phase == SyncPhase::Bar))?;
+        Ok(self.status())
+    }
+
     /// Changes mixer settings. `deck` (1 or 2) is required with channel
     /// settings (volume, EQ, kills, auto gain).
     pub fn set_mixer(&self, update: MixerSettingsUpdate) -> Result<MixerState> {
@@ -811,32 +1177,6 @@ impl Engine {
     }
 }
 
-/// Hot cues by slot and memory cues in position order, from library cues.
-fn cue_tables(cues: &[Cue]) -> ([Option<HotCue>; HOT_CUES], [Option<HotCue>; MEMORY_CUES]) {
-    let to_cue = |c: &Cue| {
-        let start = c.start_us.max(0) as f64 / 1e6;
-        HotCue {
-            start,
-            end: c.end_us.map(|e| e as f64 / 1e6).filter(|&e| e > start),
-        }
-    };
-    let mut hot_cues = [None; HOT_CUES];
-    let mut memory: Vec<HotCue> = Vec::new();
-    for c in cues {
-        match c.hot_cue {
-            Some(slot) if (slot as usize) < HOT_CUES => hot_cues[slot as usize] = Some(to_cue(c)),
-            Some(_) => {}
-            None => memory.push(to_cue(c)),
-        }
-    }
-    memory.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let mut memory_cues = [None; MEMORY_CUES];
-    for (slot, cue) in memory_cues.iter_mut().zip(memory) {
-        *slot = Some(cue);
-    }
-    (hot_cues, memory_cues)
-}
-
 /// Which memory cue to call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryCueTarget {
@@ -878,6 +1218,9 @@ impl Drop for Inner {
             if let Some(pcm) = &meta.pcm {
                 pcm.cancel();
             }
+        }
+        if let Some(pcm) = &lock(&self.shared.preview).pcm {
+            pcm.cancel();
         }
     }
 }

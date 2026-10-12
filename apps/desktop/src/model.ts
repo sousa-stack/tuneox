@@ -88,6 +88,7 @@ export const TRACK_COLORS: Record<TrackColor, string> = {
 
 export type ColumnId =
   | "position"
+  | "preview"
   | "title"
   | "artist"
   | "album"
@@ -108,10 +109,13 @@ export interface Column {
   /** Columns with a drop rank are hidden, lowest rank first, when space runs out. */
   drop?: number;
   align?: "right" | "center";
+  /** False for columns that can't be sorted by. */
+  sortable?: boolean;
 }
 
 export const COLUMNS: Column[] = [
   { id: "position", label: "#", width: "40px", min: 40, drop: 5, align: "right" },
+  { id: "preview", label: "Preview", width: "116px", min: 116, drop: 4.5, sortable: false },
   { id: "title", label: "Title", width: "minmax(140px, 3fr)", min: 140 },
   { id: "artist", label: "Artist", width: "minmax(110px, 2fr)", min: 110 },
   { id: "album", label: "Album", width: "minmax(90px, 1.4fr)", min: 90, drop: 1 },
@@ -163,6 +167,8 @@ function sortValue(item: Item, column: ColumnId): Value {
   switch (column) {
     case "position":
       return item.position;
+    case "preview":
+      return null;
     case "title":
       return row.title || null;
     case "artist":

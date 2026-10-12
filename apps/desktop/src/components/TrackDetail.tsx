@@ -1,25 +1,44 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Cue, type TrackDetails } from "../api";
+import { useDeck, useMixer } from "../decks/hooks";
 import { camelot, formatDuration, formatPosition } from "../model";
+
+/** Waits for a deck's cue or A-GAIN edit to reach the library before reading it again. */
+const EDIT_SETTLE_MS = 300;
 
 export function TrackDetail({ trackId }: { trackId: number | null }) {
   const [details, setDetails] = useState<TrackDetails | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Cue and A-GAIN edits made on a deck holding this track change what the
+  // library has: read it again once they've settled.
+  const decks = [useDeck(1).state, useDeck(2).state];
+  const mixer = useMixer();
+  const edits = decks
+    .map((d, i) => (d.track_id === trackId ? JSON.stringify([d.hot_cues, d.memory_cues, mixer.channels[i].auto_gain_db]) : ""))
+    .join("|");
+  const shownFor = useRef<number | null>(null);
 
   useEffect(() => {
     if (trackId == null) {
       setDetails(null);
+      shownFor.current = null;
       return;
     }
     let current = true;
-    api
-      .track(trackId)
-      .then((d) => current && (setDetails(d), setError(null)))
-      .catch((e) => current && setError(String(e)));
+    const fetch = () =>
+      api
+        .track(trackId)
+        .then((d) => current && (setDetails(d), setError(null)))
+        .catch((e) => current && setError(String(e)));
+    // A new selection loads at once; an edit to the shown track waits a moment.
+    const delay = shownFor.current === trackId ? EDIT_SETTLE_MS : 0;
+    shownFor.current = trackId;
+    const timer = setTimeout(fetch, delay);
     return () => {
       current = false;
+      clearTimeout(timer);
     };
-  }, [trackId]);
+  }, [trackId, edits]);
 
   if (trackId == null) {
     return <aside className="detail detail-empty">Select a track to see its cues and beat grid.</aside>;

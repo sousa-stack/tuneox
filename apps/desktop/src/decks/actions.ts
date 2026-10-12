@@ -5,8 +5,9 @@
 
 import { positionAt, tempoFactor } from "./clock";
 import { commands, type MixerInput } from "./commands";
+import { memoryCueAt, withoutHotCue, withoutMemoryCue } from "./cues";
 import { FINE_JUMP_US, LOOP_SIZES, jumpBeats } from "./grid";
-import { settings, ZOOM_SPANS, DEFAULT_ZOOM } from "./settings";
+import { settings, ZOOM_SPANS, DEFAULT_ZOOM, type QuantizeValue, type SyncPhase } from "./settings";
 import { store } from "./store";
 import { toast } from "./toast";
 import type { BendDirection, DeckId, DeckState, MixerState } from "./types";
@@ -117,6 +118,40 @@ export function memoryCue(deck: DeckId, target: number | "next" | "prev"): void 
   send(deck, commands.memoryCue(deck, target));
 }
 
+// ── Cue edits (saved to the track in the library by the engine side) ───────
+
+/** ✕ on a hot cue row, ⌘1–3: clears the pad. */
+export function hotCueDelete(deck: DeckId, slot: number): void {
+  const state = store.deck(deck);
+  if (state.track_id == null || !state.hot_cues.some((c) => c.slot === slot)) return;
+  send(deck, commands.hotCueDelete(deck, slot), withoutHotCue(state, slot));
+}
+
+/** MEMORY / M: saves the cue point, or the current or last loop, as a memory cue. */
+export function memoryCueSet(deck: DeckId): void {
+  if (loaded(deck)) send(deck, commands.memoryCueSet(deck));
+}
+
+/** ✕ on a memory cue row. */
+export function memoryCueDelete(deck: DeckId, index: number): void {
+  const state = store.deck(deck);
+  if (state.track_id == null || index >= state.memory_cues.length) return;
+  send(deck, commands.memoryCueDelete(deck, index), withoutMemoryCue(state, index));
+}
+
+/** X: deletes the memory cue the deck is parked on (call one first, as in rekordbox). */
+export function memoryCueDeleteHere(deck: DeckId): void {
+  const state = store.deck(deck);
+  if (state.track_id == null) return;
+  const index = memoryCueAt(state, currentPosition(deck));
+  if (index == null) {
+    const letter = deck === 1 ? "A" : "B";
+    toast(`Deck ${letter} isn't on a memory cue. Call one first (A–; or N/B), then X deletes it.`);
+    return;
+  }
+  memoryCueDelete(deck, index);
+}
+
 // Seeks coalesce: while one is in flight only the latest target waits, so a
 // fast drag never queues up stale jumps.
 const seeks: { busy: boolean; next: number | null; patch: number }[] = [
@@ -154,6 +189,108 @@ function pumpSeek(deck: DeckId) {
       s.busy = false;
       pumpSeek(deck);
     });
+}
+
+// ── Scrubbing ───────────────────────────────────────────────────────────────
+// Dragging the enlarged waveform moves the deck like a record (deck_scrub).
+// The waveform follows the pointer exactly (a patch on the shown state); the
+// audio follows in the engine. Commands go one at a time and consecutive
+// moves collapse to the latest, so a fast drag never queues up.
+
+interface ScrubOp {
+  action: "start" | "move" | "end";
+  position?: number;
+}
+
+interface Scrub {
+  ops: ScrubOp[];
+  busy: boolean;
+  /** The patch showing the dragged position. */
+  patch: number;
+  /** Stops waiting for the engine to settle after a drag. */
+  settle: (() => void) | null;
+}
+
+const scrubs: [Scrub, Scrub] = [
+  { ops: [], busy: false, patch: 0, settle: null },
+  { ops: [], busy: false, patch: 0, settle: null },
+];
+
+function showScrubPosition(deck: DeckId, positionUs: number, rate = 0) {
+  const s = scrubs[deck - 1];
+  const previous = s.patch;
+  s.patch = store.patch(deck, { position_us: positionUs, at_ms: engineNow(), rate });
+  if (previous) store.unpatch(deck, previous);
+}
+
+function queueScrub(deck: DeckId, op: ScrubOp) {
+  const s = scrubs[deck - 1];
+  const last = s.ops[s.ops.length - 1];
+  if (op.action === "move" && last?.action === "move") last.position = op.position;
+  else s.ops.push(op);
+  pumpScrub(deck);
+}
+
+function pumpScrub(deck: DeckId) {
+  const s = scrubs[deck - 1];
+  const op = s.busy ? undefined : s.ops.shift();
+  if (!op) return;
+  s.busy = true;
+  commands
+    .scrub(deck, op.action, op.position)
+    .then((state) => store.applyDeck(state))
+    .catch(toast)
+    .finally(() => {
+      s.busy = false;
+      if (op.action === "end" && s.ops.length === 0) awaitSettle(deck);
+      pumpScrub(deck);
+    });
+}
+
+/** Keeps the dragged position on screen until the engine has settled or handed over to playback. */
+function awaitSettle(deck: DeckId) {
+  const s = scrubs[deck - 1];
+  const patch = s.patch;
+  const done = () => {
+    stop();
+    clearTimeout(timer);
+    store.unpatch(deck, patch);
+    if (s.patch === patch) s.patch = 0;
+    if (s.settle === done) s.settle = null;
+  };
+  const stop = store.subscribeFrames((d) => d === deck && !store.deck(deck).scrubbing && done());
+  const timer = setTimeout(done, 400);
+  s.settle = done;
+  if (!store.deck(deck).scrubbing) done();
+}
+
+/** Pointer down and moving on a lane: the hand goes on the record. Returns where it was. */
+export function scrubStart(deck: DeckId): number {
+  const state = store.deck(deck);
+  if (state.track_id == null) return 0;
+  const s = scrubs[deck - 1];
+  s.settle?.();
+  const position = currentPosition(deck);
+  showScrubPosition(deck, position);
+  queueScrub(deck, { action: "start", position });
+  return position;
+}
+
+export function scrubMove(deck: DeckId, positionUs: number): void {
+  const state = store.deck(deck);
+  if (state.track_id == null) return;
+  const target = Math.max(0, state.duration_us > 0 ? Math.min(positionUs, state.duration_us) : positionUs);
+  showScrubPosition(deck, target);
+  queueScrub(deck, { action: "move", position: target });
+}
+
+/** Pointer up: let go. A playing deck plays on from here; a paused one rests here. */
+export function scrubEnd(deck: DeckId, positionUs: number): void {
+  const state = store.deck(deck);
+  if (state.track_id == null) return;
+  const target = Math.max(0, state.duration_us > 0 ? Math.min(positionUs, state.duration_us) : positionUs);
+  showScrubPosition(deck, target, state.playing ? tempoFactor(state.tempo_percent) : 0);
+  queueScrub(deck, { action: "end", position: target });
 }
 
 // ── Loops ───────────────────────────────────────────────────────────────────
@@ -203,6 +340,25 @@ export function toggleSync(deck: DeckId): void {
 
 export function setMaster(deck: DeckId): void {
   if (loaded(deck)) send(deck, commands.setMaster(deck), { master: true });
+}
+
+/** The quantize resolution for both decks (persisted; sent to the engine). */
+export function setQuantizeValue(beats: QuantizeValue): void {
+  settings.update({ quantizeBeats: beats });
+  commands.quantizeValue(beats).catch(toast);
+}
+
+/** What beat sync aligns: the beat, or (a TuneOx extra) the bar. */
+export function setSyncPhase(unit: SyncPhase): void {
+  settings.update({ syncPhase: unit });
+  commands.syncPhase(unit).catch(toast);
+}
+
+/** At launch: hands the persisted player preferences to the engine. */
+export function applyPlayerSettings(status: { quantize_beats: number; sync_phase: SyncPhase }): void {
+  const s = settings.get();
+  if (status.quantize_beats !== s.quantizeBeats) commands.quantizeValue(s.quantizeBeats).catch(toast);
+  if (status.sync_phase !== s.syncPhase) commands.syncPhase(s.syncPhase).catch(toast);
 }
 
 export function toggleQuantize(deck: DeckId): void {

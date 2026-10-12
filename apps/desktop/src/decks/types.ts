@@ -21,6 +21,9 @@ export interface HotCueState {
   start_us: number;
   /** End of a hot loop. */
   end_us: number | null;
+  /** Hot cue palette index; null = the slot's default colour. */
+  color: number | null;
+  comment: string | null;
 }
 
 export interface MemoryCueState {
@@ -28,6 +31,9 @@ export interface MemoryCueState {
   index: number;
   start_us: number;
   end_us: number | null;
+  /** Palette index; null = the default (red). */
+  color: number | null;
+  comment: string | null;
 }
 
 export interface DeckState {
@@ -55,8 +61,43 @@ export interface DeckState {
   loop: LoopState | null;
   last_loop: LoopState | null;
   loop_in_us: number | null;
+  /** Being dragged with deck_scrub; `rate` is the drag speed (negative backwards). */
+  scrubbing: boolean;
   hot_cues: HotCueState[];
   memory_cues: MemoryCueState[];
+}
+
+/** The browser's preview player (`preview_play`): a clock like a deck's. */
+export interface PreviewState {
+  track_id: number | null;
+  playing: boolean;
+  loading: boolean;
+  error: string | null;
+  position_us: number;
+  at_ms: number;
+  /** 1 while playing, 0 when stopped or waiting for the decoder. */
+  rate: number;
+  duration_us: number;
+  auto_gain_db: number;
+}
+
+/** A `tuneox://preview` event. */
+export interface PreviewEvent extends PreviewState {
+  sent_at_ms: number;
+}
+
+export function idlePreview(): PreviewState {
+  return {
+    track_id: null,
+    playing: false,
+    loading: false,
+    error: null,
+    position_us: 0,
+    at_ms: 0,
+    rate: 0,
+    duration_us: 0,
+    auto_gain_db: 0,
+  };
 }
 
 /** A `tuneox://deck` event: the state plus the engine clock at send time. */
@@ -96,6 +137,11 @@ export interface PlayerStatus {
   decks: [DeckState, DeckState];
   mixer: MixerState;
   hot_cue_gate: boolean;
+  /** Quantize resolution in beats: 0.125, 0.25, 0.5 or 1. */
+  quantize_beats: number;
+  /** What beat sync aligns: "beat" (rekordbox) or "bar" (a TuneOx extra). */
+  sync_phase: "beat" | "bar";
+  preview: PreviewState;
   output: OutputInfo | null;
 }
 
@@ -152,6 +198,7 @@ export function emptyDeck(deck: DeckId): DeckState {
     loop: null,
     last_loop: null,
     loop_in_us: null,
+    scrubbing: false,
     hot_cues: [],
     memory_cues: [],
   };

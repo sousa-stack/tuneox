@@ -6,11 +6,11 @@ import { TrackTable } from "./components/TrackTable";
 import { TrackDetail } from "./components/TrackDetail";
 import { DualPlayer } from "./components/decks/DualPlayer";
 import { Toasts, TrackMenu, type MenuRequest } from "./components/decks/Overlays";
-import { loadToFreeDeck } from "./decks/actions";
+import { loadToFreeDeck, setQuantizeValue, setSyncPhase } from "./decks/actions";
 import { beginTrackDrag } from "./decks/drag";
 import { useDeckEngine, useSettings } from "./decks/hooks";
 import { useDeckKeys } from "./decks/keyboard";
-import { settings as deckSettings } from "./decks/settings";
+import { settings as deckSettings, type QuantizeValue } from "./decks/settings";
 import type { WaveformStyle } from "./decks/types";
 import "./App.css";
 import "./decks.css";
@@ -19,6 +19,14 @@ const STYLES: [WaveformStyle, string][] = [
   ["blue", "BLUE"],
   ["rgb", "RGB"],
   ["three_band", "3BAND"],
+];
+
+/** rekordbox's "Quantize Beat Value" choices. */
+const QUANTIZE_LABELS: [QuantizeValue, string][] = [
+  [0.125, "1/8"],
+  [0.25, "1/4"],
+  [0.5, "1/2"],
+  [1, "1"],
 ];
 
 type Loading = { loaded: number; total: number } | null;
@@ -120,6 +128,9 @@ export default function App() {
     return sort ? sortItems(filtered, sort) : filtered;
   }, [base, deferredQuery, sort]);
 
+  const viewKey = view.kind === "playlist" ? `playlist:${view.id}` : view.kind;
+  const filter = useMemo(() => ({ view: viewKey, query: deferredQuery }), [viewKey, deferredQuery]);
+
   const onSort = (column: ColumnId) =>
     setSort((current) => {
       if (current?.column !== column) return { column, descending: column === "rating" || column === "added" };
@@ -180,6 +191,44 @@ export default function App() {
                 onClick={() => deckSettings.update({ style })}
               >
                 {label}
+              </button>
+            ))}
+          </div>
+          <div
+            className="segmented compact"
+            role="radiogroup"
+            aria-label="Quantize resolution"
+            title="Quantize resolution (both decks): with Q on, cue, loop and hot cue points snap to this"
+          >
+            <span className="seg-label">Q</span>
+            {QUANTIZE_LABELS.map(([beats, label]) => (
+              <button
+                key={beats}
+                role="radio"
+                aria-checked={decks.quantizeBeats === beats}
+                className={decks.quantizeBeats === beats ? "on" : ""}
+                onClick={() => setQuantizeValue(beats)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div
+            className="segmented compact"
+            role="radiogroup"
+            aria-label="Beat sync aligns"
+            title="BEAT SYNC aligns beats (as rekordbox does), or whole bars, downbeat to downbeat"
+          >
+            <span className="seg-label">SYNC</span>
+            {(["beat", "bar"] as const).map((unit) => (
+              <button
+                key={unit}
+                role="radio"
+                aria-checked={decks.syncPhase === unit}
+                className={decks.syncPhase === unit ? "on" : ""}
+                onClick={() => setSyncPhase(unit)}
+              >
+                {unit.toUpperCase()}
               </button>
             ))}
           </div>
@@ -244,6 +293,7 @@ export default function App() {
                 onSelect={setSelectedId}
                 sort={sort}
                 onSort={onSort}
+                filter={filter}
                 onRowMouseDown={(row, e) => beginTrackDrag(row.id, [row.title, row.artist].filter(Boolean).join(" · "), e)}
                 onRowDoubleClick={loadToFreeDeck}
                 onRowContextMenu={(trackId, x, y) => setMenu({ trackId, x, y })}

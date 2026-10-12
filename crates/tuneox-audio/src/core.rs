@@ -15,13 +15,14 @@ use rtrb::{Consumer, Producer};
 
 use crate::deck::{
     Deck, HOT_CUES, HotCue, LoadedTrack, Loop, MAX_BPM, MEMORY_CUES, MIN_BPM, MemoryTarget,
-    SyncMode,
+    ScrubPhase, SyncMode,
 };
-use crate::grid::{Grid, wrap_phase};
+use crate::grid::{BEATS_PER_BAR, Grid, wrap_phase, wrap_to};
 use crate::mixer::{
     AUTO_GAIN_MAX_DB, AUTO_GAIN_MIN_DB, EQ_KILL_DB, EQ_MAX_DB, Mixer, MixerSettings,
 };
 use crate::pcm::TrackPcm;
+use crate::preview::{PreviewTrack, PreviewVoice};
 
 /// Frames rendered per snapshot; device buffers are split into blocks of at
 /// most this size.
@@ -63,6 +64,26 @@ pub(crate) enum Control {
         deck: usize,
         target: MemoryTarget,
     },
+    HotCueDelete {
+        deck: usize,
+        slot: usize,
+    },
+    MemoryCueSet(usize),
+    MemoryCueDelete {
+        deck: usize,
+        index: usize,
+    },
+    Scrub {
+        deck: usize,
+        phase: ScrubPhase,
+        seconds: Option<f64>,
+    },
+    /// Plays the preview voice from `seconds`; with a track, that one.
+    PreviewPlay {
+        track: Option<PreviewTrack>,
+        seconds: f64,
+    },
+    PreviewStop,
     Seek {
         deck: usize,
         seconds: f64,
@@ -106,6 +127,10 @@ pub(crate) enum Control {
         on: bool,
     },
     HotCueGate(bool),
+    /// Quantize resolution in beats, both decks.
+    QuantizeBeats(f64),
+    /// Beat sync aligns bars (true) or beats.
+    SyncBars(bool),
     Mixer(MixerUpdate),
 }
 
@@ -153,16 +178,30 @@ pub(crate) struct DeckSnapshot {
     pub last_loop: Option<Loop>,
     pub last_loop_beats: Option<f64>,
     pub loop_in: Option<f64>,
+    pub scrubbing: bool,
     pub hot_cues: [Option<HotCue>; HOT_CUES],
     pub memory_cues: [Option<HotCue>; MEMORY_CUES],
+    /// What MEMORY would save now.
+    pub memory_candidate: Option<HotCue>,
     pub jumps: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct PreviewSnapshot {
+    pub load_id: u64,
+    pub playing: bool,
+    pub stalled: bool,
+    pub position: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct Snapshot {
     pub decks: [DeckSnapshot; 2],
+    pub preview: PreviewSnapshot,
     pub mixer: MixerSettings,
     pub hot_cue_gate: bool,
+    pub quantize_beats: f64,
+    pub sync_bars: bool,
     /// Sequence number of the last command applied.
     pub applied_seq: u64,
     /// Engine clock when `decks[_].position` is heard.
@@ -171,16 +210,20 @@ pub(crate) struct Snapshot {
 
 pub(crate) struct Core {
     decks: [Deck; 2],
+    preview: PreviewVoice,
     mixer: Mixer,
     master: Option<usize>,
     /// "Gate playback during Pause" for hot cues (off by default).
     hot_cue_gate: bool,
+    /// Beat sync aligns the bar, not just the beat (a TuneOx extra).
+    sync_bars: bool,
     device_rate: f64,
     commands: Consumer<(u64, Control)>,
     garbage: Producer<Garbage>,
     state: triple_buffer::Input<Snapshot>,
     applied_seq: u64,
-    deck_buffers: [[f32; SUB_BLOCK]; 4],
+    /// Left/right for deck 1, deck 2 and the preview voice.
+    voice_buffers: [[f32; SUB_BLOCK]; 6],
     block: Box<[f32]>,
     frames_rendered: u64,
 }
@@ -194,15 +237,17 @@ impl Core {
     ) -> Self {
         let mut core = Self {
             decks: [Deck::default(), Deck::default()],
+            preview: PreviewVoice::default(),
             mixer: Mixer::new(device_rate as f64),
             master: None,
             hot_cue_gate: false,
+            sync_bars: false,
             device_rate: device_rate as f64,
             commands,
             garbage,
             state,
             applied_seq: 0,
-            deck_buffers: [[0.0; SUB_BLOCK]; 4],
+            voice_buffers: [[0.0; SUB_BLOCK]; 6],
             block: vec![0.0; MAX_BLOCK * 2].into_boxed_slice(),
             frames_rendered: 0,
         };
@@ -244,14 +289,21 @@ impl Core {
             if start > 0 {
                 self.update_rates();
             }
-            let [l0, r0, l1, r1] = &mut self.deck_buffers;
+            let [l0, r0, l1, r1, lp, rp] = &mut self.voice_buffers;
             let rate = self.device_rate;
             self.decks[0].render(&mut l0[..n], &mut r0[..n], rate);
             self.decks[1].render(&mut l1[..n], &mut r1[..n], rate);
+            lp[..n].fill(0.0);
+            rp[..n].fill(0.0);
+            self.preview.render(&mut lp[..n], &mut rp[..n], rate);
             self.mixer.process(
                 [(&l0[..n], &r0[..n]), (&l1[..n], &r1[..n])],
+                (&lp[..n], &rp[..n]),
                 &mut self.block[2 * start..2 * (start + n)],
             );
+            if let Some(finished) = self.preview.take_finished() {
+                self.discard(Garbage::Track(finished));
+            }
             start += n;
         }
         self.frames_rendered += frames as u64;
@@ -273,11 +325,21 @@ impl Core {
     fn process_commands(&mut self) {
         while let Ok((seq, control)) = self.commands.pop() {
             let was_playing = self.decks.each_ref().map(|d| d.play_latched);
+            let was_moving = self.decks.each_ref().map(|d| d.moving());
             self.apply(control);
             for (deck, was) in was_playing.into_iter().enumerate() {
                 if !was && self.decks[deck].play_latched {
                     self.on_started(deck);
                 }
+            }
+            if was_moving
+                .into_iter()
+                .zip(&self.decks)
+                .any(|(was, d)| !was && d.moving())
+            {
+                // One output: a deck starting to play stops the preview, as
+                // the preview pauses the decks.
+                self.stop_preview();
             }
             self.applied_seq = seq;
         }
@@ -319,6 +381,30 @@ impl Core {
                 }
             }
             Control::MemoryCue { deck, target } => self.decks[deck].memory_cue_call(target),
+            Control::HotCueDelete { deck, slot } => self.decks[deck].hot_cue_delete(slot),
+            Control::MemoryCueSet(deck) => self.decks[deck].memory_cue_set(),
+            Control::MemoryCueDelete { deck, index } => self.decks[deck].memory_cue_delete(index),
+            Control::Scrub {
+                deck,
+                phase,
+                seconds,
+            } => {
+                if self.decks[deck].loaded() {
+                    self.decks[deck].scrub(phase, seconds);
+                }
+            }
+            Control::PreviewPlay { track, seconds } => {
+                // Previewing pauses any deck that's playing (rekordbox).
+                for deck in &mut self.decks {
+                    if deck.moving() {
+                        deck.pause();
+                    }
+                }
+                if let Some(old) = self.preview.play(track, seconds) {
+                    self.discard(Garbage::Track(old));
+                }
+            }
+            Control::PreviewStop => self.stop_preview(),
             Control::Seek { deck, seconds } => self.decks[deck].seek(seconds),
             Control::BeatJump { deck, beats } => self.decks[deck].beat_jump(beats),
             Control::BeatLoop { deck, beats } => self.decks[deck].beat_loop(beats),
@@ -355,7 +441,19 @@ impl Core {
             }
             Control::Quantize { deck, on } => self.decks[deck].quantize = on,
             Control::HotCueGate(on) => self.hot_cue_gate = on,
+            Control::QuantizeBeats(beats) => {
+                for deck in &mut self.decks {
+                    deck.quantize_beats = beats;
+                }
+            }
+            Control::SyncBars(on) => self.sync_bars = on,
             Control::Mixer(update) => self.update_mixer(update),
+        }
+    }
+
+    fn stop_preview(&mut self) {
+        if let Some(old) = self.preview.stop() {
+            self.discard(Garbage::Track(old));
         }
     }
 
@@ -544,13 +642,24 @@ impl Core {
             && slave.play_latched
             && slave.bend == 0
             && !slave.stalled
+            && !slave.scrubbing()
             && loop_keeps_phase(slave)
             && lead.moving()
             && !lead.stalled
+            && !lead.scrubbing()
             && loop_keeps_phase(lead);
+        let bars =
+            self.sync_bars && factor == 1.0 && loop_keeps_bars(slave) && loop_keeps_bars(lead);
         let phase_error = lock_phase.then(|| {
-            let target = lead_grid.beat_at(lead.pos) * factor;
-            wrap_phase(target - slave_grid.beat_at(slave.pos))
+            if bars {
+                // Downbeat to downbeat: the nearest position with the
+                // master's place in the bar, at most half a bar away.
+                let target = lead_grid.bar_beat_at(lead.pos);
+                wrap_to(target - slave_grid.bar_beat_at(slave.pos), BEATS_PER_BAR)
+            } else {
+                let target = lead_grid.beat_at(lead.pos) * factor;
+                wrap_phase(target - slave_grid.beat_at(slave.pos))
+            }
         });
         Some(SyncTarget {
             rate,
@@ -562,8 +671,16 @@ impl Core {
     fn publish(&mut self, at_ms: f64) {
         let snapshot = Snapshot {
             decks: [self.deck_snapshot(0), self.deck_snapshot(1)],
+            preview: PreviewSnapshot {
+                load_id: self.preview.load_id,
+                playing: self.preview.playing,
+                stalled: self.preview.stalled,
+                position: self.preview.pos,
+            },
             mixer: self.mixer.settings,
             hot_cue_gate: self.hot_cue_gate,
+            quantize_beats: self.decks[0].quantize_beats,
+            sync_bars: self.sync_bars,
             applied_seq: self.applied_seq,
             at_ms,
         };
@@ -578,10 +695,10 @@ impl Core {
             load_id: d.load_id,
             playing: d.moving(),
             position: d.pos,
-            rate: if d.moving() && !d.stalled {
-                d.nominal_rate * d.bend_factor()
-            } else {
-                0.0
+            rate: match d.scrub_velocity() {
+                Some(velocity) => velocity,
+                None if d.moving() && !d.stalled => d.nominal_rate * d.bend_factor(),
+                None => 0.0,
             },
             tempo_percent: if following || d.nominal_rate != d.fader_rate() {
                 (d.nominal_rate - 1.0) * 100.0
@@ -602,8 +719,10 @@ impl Core {
             last_loop: d.last_loop,
             last_loop_beats: d.last_loop.and_then(|lp| d.loop_beats(&lp)),
             loop_in: d.loop_in,
+            scrubbing: d.scrubbing(),
             hot_cues: d.hot_cues,
             memory_cues: d.memory_cues,
+            memory_candidate: d.memory_cue_candidate(),
             jumps: d.jumps,
         }
     }
@@ -619,6 +738,18 @@ fn loop_keeps_phase(deck: &Deck) -> bool {
             .loop_beats(&lp)
             .is_some_and(|beats| beats > 0.99 && (beats - beats.round()).abs() < 0.01),
         (Some(_), None) => false,
+    }
+}
+
+/// Whether the deck's bar phase runs on steadily: no loop, or a loop of
+/// whole bars. Bar sync falls back to beat phase otherwise.
+fn loop_keeps_bars(deck: &Deck) -> bool {
+    match deck.active_loop {
+        None => true,
+        Some(lp) => deck.loop_beats(&lp).is_some_and(|beats| {
+            let bars = beats / BEATS_PER_BAR;
+            bars > 0.99 && (bars - bars.round()).abs() < 0.0025
+        }),
     }
 }
 

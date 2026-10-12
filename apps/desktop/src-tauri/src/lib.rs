@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 use tuneox_audio::{Engine, EngineEvent, MixerSettingsUpdate};
-use tuneox_commands::{Context, Effect};
+use tuneox_commands::Context;
 use tuneox_library::Library;
 
 type Shared = Arc<Mutex<Context>>;
@@ -19,14 +19,15 @@ struct Contexts {
     /// Deck and mixer commands, on their own library connection and sharing
     /// the audio engine, so a long import never holds up a deck.
     player: Shared,
-    /// Names of the commands that go to `player`.
-    playback: Arc<HashSet<&'static str>>,
+    /// Names of the commands that go to `player`: every deck, mixer and
+    /// preview command, including the ones that also save to the library.
+    player_commands: Arc<HashSet<&'static str>>,
 }
 
 /// Runs any TuneOx command by name. The UI is a client of the same command
 /// registry as the CLI and MCP server; progress arrives as
-/// `tuneox://progress` events, deck and mixer state as `tuneox://deck` and
-/// `tuneox://mixer`.
+/// `tuneox://progress` events, deck, mixer and preview player state as
+/// `tuneox://deck`, `tuneox://mixer` and `tuneox://preview`.
 #[tauri::command]
 async fn run_command(
     app: AppHandle,
@@ -35,7 +36,7 @@ async fn run_command(
     input: Value,
 ) -> Result<Value, String> {
     let contexts = core.0.clone()?;
-    let ctx = if contexts.playback.contains(name.as_str()) {
+    let ctx = if contexts.player_commands.contains(name.as_str()) {
         contexts.player
     } else {
         contexts.library
@@ -71,15 +72,15 @@ fn open_contexts() -> Result<Contexts, String> {
         Ok(engine) => library = library.with_engine(engine.clone()),
         Err(e) => eprintln!("audio engine unavailable: {e}"),
     }
-    let playback = tuneox_commands::catalog()
+    let player_commands = tuneox_commands::catalog()
         .into_iter()
-        .filter(|c| c.effect == Effect::Playback)
+        .filter(|c| c.player)
         .map(|c| c.name)
         .collect();
     Ok(Contexts {
         library: Arc::new(Mutex::new(library)),
         player: Arc::new(Mutex::new(player)),
-        playback: Arc::new(playback),
+        player_commands: Arc::new(player_commands),
     })
 }
 
@@ -90,6 +91,7 @@ fn forward_events(app: &AppHandle, engine: &Engine) {
         let _ = match event {
             EngineEvent::Deck(deck) => app.emit("tuneox://deck", deck),
             EngineEvent::Mixer(mixer) => app.emit("tuneox://mixer", mixer),
+            EngineEvent::Preview(preview) => app.emit("tuneox://preview", preview),
         };
     });
 }

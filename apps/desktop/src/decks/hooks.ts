@@ -2,8 +2,9 @@
 // deck's non-clock state, the mixer, settings or track data change.
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
-import { applyEngineMixer } from "./actions";
-import { commands, onDeckEvent, onMixerEvent } from "./commands";
+import { applyEngineMixer, applyPlayerSettings } from "./actions";
+import { commands, onDeckEvent, onMixerEvent, onPreviewEvent } from "./commands";
+import { preview } from "./preview";
 import { settings, type Settings } from "./settings";
 import { store, type DeckView } from "./store";
 import { toast, toastStore, type Toast } from "./toast";
@@ -47,12 +48,18 @@ export function useDeckEngine(): void {
         store.applyDeck(state, sent_at_ms);
       }),
       onMixerEvent(applyEngineMixer),
+      onPreviewEvent((event) => {
+        const { sent_at_ms, ...state } = event;
+        preview.apply(state, sent_at_ms);
+      }),
     ];
     commands
       .status()
       .then((status) => {
         if (!alive) return;
         store.applyStatus(status);
+        preview.apply(status.preview);
+        applyPlayerSettings(status);
         // Without a device the engine still runs, silently.
         if (status.output?.error) toast(`No audio output: ${status.output.error}`);
       })

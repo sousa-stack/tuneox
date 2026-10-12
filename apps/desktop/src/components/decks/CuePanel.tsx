@@ -1,26 +1,43 @@
 // The sub-information panel (research §1.3): HOT CUE A–H (click a stored pad
 // to jump and play, an empty one to store the position) and MEMORY (click to
-// jump and pause).
+// jump and pause). Hovering a row shows ✕, which deletes the cue from the
+// deck and the track. Colours and comments come with the engine's cues.
 
 import { useMemo } from "react";
 import * as act from "../../decks/actions";
 import { formatClock } from "../../decks/render/animator";
 import { hotCues, memoryCues } from "../../decks/cues";
-import { useDeck, useSettings, useTrackData } from "../../decks/hooks";
+import { useDeck, useSettings } from "../../decks/hooks";
 import { settings as settingsStore } from "../../decks/settings";
 import type { DeckId } from "../../decks/types";
 
 const noFocus = (e: React.MouseEvent) => e.preventDefault();
 
+function DeleteButton({ title, onDelete }: { title: string; onDelete: () => void }) {
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      className="cue-delete"
+      title={title}
+      aria-label={title}
+      onMouseDown={noFocus}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={onDelete}
+    >
+      ✕
+    </button>
+  );
+}
+
 export function CuePanel({ deck }: { deck: DeckId }) {
   const { state } = useDeck(deck);
-  const data = useTrackData(state.track_id);
   const settings = useSettings();
-  const details = data?.details ?? null;
-  const hot = useMemo(() => hotCues(state, details), [state, details]);
-  const memory = useMemo(() => memoryCues(state, details), [state, details]);
+  const hot = useMemo(() => hotCues(state), [state]);
+  const memory = useMemo(() => memoryCues(state), [state]);
   const tab = settings.cueTab[deck - 1];
   const loaded = state.track_id != null;
+  const shift = deck === 2 ? "⇧" : "";
   const tabButton = (id: "memory" | "hot", label: string, count: number) => (
     <button type="button" tabIndex={-1} className={tab === id ? "on" : ""} onMouseDown={noFocus} onClick={() => settingsStore.updateDeck("cueTab", deck, id)}>
       {label}
@@ -35,42 +52,51 @@ export function CuePanel({ deck }: { deck: DeckId }) {
       </div>
       {tab === "hot" ? (
         <ul className="cue-list hot">
-          {hot.map((cue, slot) => (
-            <li key={slot}>
-              <button
-                type="button"
-                tabIndex={-1}
-                className={`cue-row${cue ? "" : " empty"}`}
-                disabled={!loaded}
-                title={cue ? `Hot cue ${String.fromCharCode(65 + slot)}: jump and play` : `Store hot cue ${String.fromCharCode(65 + slot)} here`}
-                onMouseDown={noFocus}
-                onPointerDown={(e) => {
-                  if (e.button !== 0) return;
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                  act.hotCuePress(deck, slot);
-                }}
-                onPointerUp={() => act.hotCueRelease(deck, slot)}
-              >
-                <span className="pad" style={cue ? { background: cue.color, borderColor: cue.color } : undefined}>
-                  {String.fromCharCode(65 + slot)}
-                </span>
-                {cue ? (
-                  <>
-                    <span className="cue-time">{formatClock(cue.start_us)}</span>
-                    <span className="cue-note">{cue.comment ?? (cue.end_us != null ? loopLabel(cue.start_us, cue.end_us, state.original_bpm) : "")}</span>
-                  </>
-                ) : (
-                  <span className="cue-note faint">—</span>
+          {hot.map((cue, slot) => {
+            const letter = String.fromCharCode(65 + slot);
+            return (
+              <li key={slot} className="cue-item">
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  className={`cue-row${cue ? "" : " empty"}`}
+                  disabled={!loaded}
+                  title={cue ? `Hot cue ${letter}: jump and play` : `Store hot cue ${letter} here`}
+                  onMouseDown={noFocus}
+                  onPointerDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    act.hotCuePress(deck, slot);
+                  }}
+                  onPointerUp={() => act.hotCueRelease(deck, slot)}
+                >
+                  <span className="pad" style={cue ? { background: cue.color, borderColor: cue.color } : undefined}>
+                    {letter}
+                  </span>
+                  {cue ? (
+                    <>
+                      <span className="cue-time">{formatClock(cue.start_us)}</span>
+                      <span className="cue-note">{cue.comment ?? (cue.end_us != null ? loopLabel(cue.start_us, cue.end_us, state.original_bpm) : "")}</span>
+                    </>
+                  ) : (
+                    <span className="cue-note faint">—</span>
+                  )}
+                </button>
+                {cue && (
+                  <DeleteButton
+                    title={`Delete hot cue ${letter}${slot < 3 ? ` (${shift}⌘${slot + 1})` : ""}`}
+                    onDelete={() => act.hotCueDelete(deck, slot)}
+                  />
                 )}
-              </button>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       ) : (
         <ul className="cue-list memory">
-          {memory.length === 0 && <li className="cue-empty">{loaded ? "No memory cues" : ""}</li>}
+          {memory.length === 0 && <li className="cue-empty">{loaded ? `No memory cues. MEMORY (${shift}M) saves one.` : ""}</li>}
           {memory.map((cue) => (
-            <li key={cue.id}>
+            <li key={cue.id} className="cue-item">
               <button
                 type="button"
                 tabIndex={-1}
@@ -83,6 +109,7 @@ export function CuePanel({ deck }: { deck: DeckId }) {
                 <span className="cue-time">{formatClock(cue.start_us)}</span>
                 <span className="cue-note">{cue.comment ?? (cue.end_us != null ? loopLabel(cue.start_us, cue.end_us, state.original_bpm) : "")}</span>
               </button>
+              <DeleteButton title={`Delete this memory ${cue.end_us != null ? "loop" : "cue"}`} onDelete={() => act.memoryCueDelete(deck, cue.id)} />
             </li>
           ))}
         </ul>

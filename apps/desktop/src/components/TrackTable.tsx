@@ -9,6 +9,7 @@ import {
   type Item,
   type Sort,
 } from "../model";
+import { PreviewCell } from "./PreviewCell";
 
 const ROW_HEIGHT = 26;
 
@@ -18,16 +19,25 @@ interface Props {
   onSelect: (id: number) => void;
   sort: Sort | null;
   onSort: (column: ColumnId) => void;
+  /**
+   * The view and search text the items are filtered by. When it changes
+   * the list starts from the top, or keeps the selected row in sight if a
+   * search the user typed still matches it.
+   */
+  filter: { view: string; query: string };
   /** Mouse down on a row: may become a drag onto a deck. */
   onRowMouseDown?: (row: Item["row"], event: MouseEvent) => void;
   onRowDoubleClick?: (id: number) => void;
   onRowContextMenu?: (id: number, x: number, y: number) => void;
 }
 
-export function TrackTable({ items, selectedId, onSelect, sort, onSort, onRowMouseDown, onRowDoubleClick, onRowContextMenu }: Props) {
+export function TrackTable({ items, selectedId, onSelect, sort, onSort, filter, onRowMouseDown, onRowDoubleClick, onRowContextMenu }: Props) {
   const tableRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
+  /** The selection just moved by keyboard: bring it into view. */
+  const keyboardMove = useRef(false);
+  const lastFilter = useRef(filter);
 
   useLayoutEffect(() => {
     const element = tableRef.current;
@@ -49,10 +59,31 @@ export function TrackTable({ items, selectedId, onSelect, sort, onSort, onRowMou
 
   const selectedIndex = items.findIndex((item) => item.row.id === selectedId);
 
-  // Keep the selection visible when it moves by keyboard or the list changes.
+  // Scroll only when the user asked for it: a keyboard move brings the
+  // selection into view; a new search or view starts at the top, unless a
+  // search the user typed still matches the selected row, which then stays
+  // in sight. Library reloads, sorting and clicks never scroll, and clearing
+  // the search doesn't jump to the selection deep in the collection.
   useEffect(() => {
-    if (selectedIndex >= 0) virtualizer.scrollToIndex(selectedIndex, { align: "auto" });
-  }, [selectedIndex, virtualizer]);
+    const filterChanged = filter.view !== lastFilter.current.view || filter.query !== lastFilter.current.query;
+    const sameView = filter.view === lastFilter.current.view;
+    lastFilter.current = filter;
+    const element = scrollRef.current;
+    if (keyboardMove.current) {
+      keyboardMove.current = false;
+      if (selectedIndex >= 0) virtualizer.scrollToIndex(selectedIndex, { align: "auto" });
+      return;
+    }
+    if (!filterChanged || !element) return;
+    const searching = sameView && filter.query.trim() !== "";
+    if (searching && selectedIndex >= 0) {
+      const top = selectedIndex * ROW_HEIGHT;
+      const visible = top >= element.scrollTop && top + ROW_HEIGHT <= element.scrollTop + element.clientHeight;
+      if (!visible) virtualizer.scrollToIndex(selectedIndex, { align: "center" });
+      return;
+    }
+    element.scrollTop = 0;
+  }, [filter, selectedIndex, virtualizer]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (items.length === 0) return;
@@ -61,23 +92,32 @@ export function TrackTable({ items, selectedId, onSelect, sort, onSort, onRowMou
     if (!step) return;
     e.preventDefault();
     const from = selectedIndex < 0 ? (step > 0 ? -1 : items.length) : selectedIndex;
-    onSelect(items[Math.min(items.length - 1, Math.max(0, from + step))].row.id);
+    const next = items[Math.min(items.length - 1, Math.max(0, from + step))].row.id;
+    if (next === selectedId) return;
+    keyboardMove.current = true;
+    onSelect(next);
   };
 
   return (
     <div className="table" ref={tableRef}>
       <div className="table-head" style={{ gridTemplateColumns: template }}>
         <span />
-        {columns.map((column) => (
-          <button
-            key={column.id}
-            className={`th${column.align ? ` align-${column.align}` : ""}${sort?.column === column.id ? " sorted" : ""}`}
-            onClick={() => onSort(column.id)}
-          >
-            {column.label}
-            {sort?.column === column.id && <span className="sort-arrow">{sort.descending ? "↓" : "↑"}</span>}
-          </button>
-        ))}
+        {columns.map((column) =>
+          column.sortable === false ? (
+            <span key={column.id} className="th static">
+              {column.label}
+            </span>
+          ) : (
+            <button
+              key={column.id}
+              className={`th${column.align ? ` align-${column.align}` : ""}${sort?.column === column.id ? " sorted" : ""}`}
+              onClick={() => onSort(column.id)}
+            >
+              {column.label}
+              {sort?.column === column.id && <span className="sort-arrow">{sort.descending ? "↓" : "↑"}</span>}
+            </button>
+          ),
+        )}
       </div>
       <div className="table-body" ref={scrollRef} tabIndex={0} onKeyDown={onKeyDown}>
         {items.length === 0 ? (
@@ -125,6 +165,12 @@ function cell(column: Column, { row, position }: Item) {
   switch (column.id) {
     case "position":
       return span("muted mono", position);
+    case "preview":
+      return (
+        <span key={column.id} className="td preview">
+          <PreviewCell trackId={row.id} durationSecs={row.duration_secs} />
+        </span>
+      );
     case "title":
       return span("strong", row.title, row.title);
     case "artist":
