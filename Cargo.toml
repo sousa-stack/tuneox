@@ -16,6 +16,7 @@ tuneox-library = { path = "crates/tuneox-library" }
 tuneox-commands = { path = "crates/tuneox-commands" }
 tuneox-mcp = { path = "crates/tuneox-mcp" }
 
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }

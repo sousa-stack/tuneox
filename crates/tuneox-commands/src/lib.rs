@@ -8,6 +8,7 @@
 
 mod import_rekordbox;
 mod library;
+mod waveform;
 
 use std::path::PathBuf;
 
@@ -24,6 +25,7 @@ pub use library::{
     ListTracks, ListTracksInput, ListTracksOutput, NoInput, SearchTracks, SearchTracksInput,
     SearchTracksOutput,
 };
+pub use waveform::{GetWaveform, GetWaveformInput, GetWaveformOutput};
 
 /// What running a command can change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -177,5 +179,6 @@ registry![
     SearchTracks,
     ListTracks,
     GetTrack,
+    GetWaveform,
     ImportRekordbox,
 ];

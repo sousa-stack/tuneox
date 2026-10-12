@@ -20,7 +20,7 @@ _Last updated: 2026-10-12_
 - SQLite schema v1 with FTS5 search; search by text, BPM range, key and harmonic compatibility (Camelot neighbors).
 
 **Commands, CLI and MCP**
-- Command registry: `library_summary`, `list_playlists`, `get_playlist`, `search_tracks`, `list_tracks`, `get_track`, `import_rekordbox`.
+- Command registry: `library_summary`, `list_playlists`, `get_playlist`, `search_tracks`, `list_tracks`, `get_track`, `get_waveform`, `import_rekordbox`.
 - `tuneox` CLI over the registry; `tuneox mcp` serves them as MCP tools (protocol 2026-07-28 and legacy `initialize` clients), with progress notifications.
 
 **Desktop app**
@@ -34,7 +34,7 @@ _Last updated: 2026-10-12_
 
 **Decks: waveforms, preview player and dual player** (spec: [specs/decks.md](specs/decks.md))
 - rekordbox research: dual player behavior, waveform styles and colors, sync/cue/quantize rules.
-- Waveform data: decode ANLZ waveform sections into TuneOx's waveform format; `get_waveform` command.
+- Waveform data (**done**): all six rekordbox waveforms (blue, RGB, 3-band × preview, detail) decode from ANLZ files into `tuneox_core::Waveform`; `get_waveform` serves them (0.2 ms for a 5-minute track's detail). `PWVC` identified as the 3-band gains; 3-band bands are stored low, mid, high (Deep Symmetry has the order wrong). See [research/waveforms.md](../research/waveforms.md).
 - Audio engine (`tuneox-audio`): two decks, decoding, tempo, sync, crossfader; `deck_*` commands.
 - Then: deck UI in the desktop app (overview + scrolling detail waveforms, transport, tempo, sync, mixer).
 
@@ -51,6 +51,8 @@ _Last updated: 2026-10-12_
 - Smart playlists are imported with their rules but not evaluated.
 - Beat grids are stored per beat (~12 bytes/beat); a 10k-track library is ~106 MB. Can be packed much smaller without losing precision.
 - The desktop app and MCP server both open the library file directly; the planned "one process owns the library" socket isn't built yet.
+- Waveforms exist only for tracks rekordbox analyzed (we read its ANLZ files); our own waveform generation comes with our own analysis.
+- How rekordbox draws the RGB overview (`PWV4`'s six values) and whether its CDJ-style 3-band view re-applies the `PWVC` gains are still open; `get_waveform` passes the raw values and gains through so the renderer can follow the answer. `PVDI` (vocal detection) isn't decoded.
 
 ## Decision log
 

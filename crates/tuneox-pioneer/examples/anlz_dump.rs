@@ -1,8 +1,11 @@
-//! Research tool: lists the sections, beat grid summary and cues of rekordbox
-//! analysis files.
+//! Research tool: lists the sections, beat grid summary, cues and waveforms
+//! of rekordbox analysis files.
 //!
 //!     cargo run -p tuneox-pioneer --example anlz_dump -- path/to/ANLZ0000.EXT [...]
 
+use std::time::Instant;
+
+use tuneox_core::{WaveformResolution, WaveformStyle};
 use tuneox_pioneer::anlz::AnlzFile;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,6 +37,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "  cue: {slot:>8} @ {span} {}",
                 cue.comment.as_deref().unwrap_or("")
+            );
+        }
+        for style in WaveformStyle::ALL {
+            for resolution in WaveformResolution::ALL {
+                let started = Instant::now();
+                let Some(waveform) = anlz.waveform(style, resolution)? else {
+                    continue;
+                };
+                let elapsed = started.elapsed();
+                let size = waveform.bytes_per_column();
+                let max: Vec<u8> = (0..size)
+                    .map(|field| waveform.iter_columns().map(|c| c[field]).max().unwrap_or(0))
+                    .collect();
+                let middle = waveform.column(waveform.columns / 2).unwrap_or(&[]);
+                println!(
+                    "  waveform {} {}: {} columns{}, {} bytes each, field max {max:?}, middle column {middle:?}, decoded in {elapsed:?}",
+                    style.as_str(),
+                    resolution.as_str(),
+                    waveform.columns,
+                    waveform
+                        .duration_secs()
+                        .map(|d| format!(
+                            " ({d:.2} s at {}/s)",
+                            waveform.columns_per_second.unwrap_or(0.0)
+                        ))
+                        .unwrap_or_default(),
+                    size,
+                );
+            }
+        }
+        if let Some(gains) = anlz.three_band_gains()? {
+            println!(
+                "  3-band gains: low {:.2}, mid {:.2}, high {:.2}",
+                gains.low, gains.mid, gains.high
             );
         }
     }

@@ -21,33 +21,46 @@ Shared edits that will conflict (orchestrator merges): the `registry![…]` list
 
 ## B. Waveform data
 
+Status: **done** (2026-10-12). Formats, evidence and verification: [research/waveforms.md](../../research/waveforms.md).
+
 rekordbox's analysis files hold three waveform styles, each at two resolutions (see Deep Symmetry's DJ Link analysis for the tags):
 
-| Style | Preview (whole track) | Detail (scrolling) |
+| Style | Preview (whole track) | Detail (scrolling, 150 columns/s) |
 | --- | --- | --- |
-| `blue` (monochrome) | `PWAV` in `.DAT` | `PWV3` in `.EXT` |
-| `rgb` (color) | `PWV4` in `.EXT` | `PWV5` in `.EXT` |
-| `three_band` (CDJ-3000 style) | `PWV6` in `.2EX` | `PWV7` in `.2EX` |
+| `blue` (monochrome) | `PWAV` in `.DAT`, 400 columns | `PWV3` in `.EXT` |
+| `rgb` (color) | `PWV4` in `.EXT`, 1200 columns | `PWV5` in `.EXT` |
+| `three_band` (CDJ-3000 style) | `PWV6` in `.2EX`, 1200 columns | `PWV7` in `.2EX` |
 
-`PWVC` (in `.2EX`) is not documented yet; find out what it is and whether rendering needs it.
+`PWVC` (in `.2EX`) is rekordbox's "wave normalize coefficient": the gain applied to each 3-band band (low, mid, high; u16 × 100), already baked into `PWV6`/`PWV7`. It comes along as `band_gains` in case the renderer needs it (see research for why that's not fully settled). The 3-band entries are stored **low, mid, high**, not mid, high, low as Deep Symmetry documents.
 
 **Core type** (`tuneox-core`): a renderer-friendly, Pioneer-independent waveform that our own analysis will also produce later:
 
 ```rust
 pub enum WaveformStyle { Blue, Rgb, ThreeBand }
+pub enum WaveformResolution { Preview, Detail }
 pub struct Waveform {
     pub style: WaveformStyle,
     /// Columns per second of audio for detail waveforms; None for previews,
     /// whose columns span the whole track.
     pub columns_per_second: Option<f64>,
     pub columns: u32,
-    /// Fixed-size records, one per column; layout per style is documented on
-    /// the type and in research/waveforms.md.
+    /// Fixed-size records, one per column (layouts below).
     pub data: Vec<u8>,
+    /// three_band only: the gain the analysis applied to each band.
+    pub band_gains: Option<BandGains>,   // { low, mid, high }: f64
 }
 ```
 
-The waveform agent chooses each style's per-column record layout, normalizing Pioneer's packed bit fields into whole bytes (e.g. `rgb`: r, g, b, height; `three_band`: low, mid, high) **without losing information the renderer needs to look like rekordbox**. Document the final layouts here and on the type.
+Records. Every value is a byte where 255 is the full scale of the source field; narrower Pioneer fields are widened with `round(v × 255 / max)`, which `round(x × max / 255)` reverses exactly (`tuneox_pioneer::anlz::{widen, narrow}`).
+
+| Style | Resolution | Bytes | Record |
+| --- | --- | --- | --- |
+| `blue` | both | 2 | height (from 0–31), whiteness (from 0–7; rekordbox draws 8 tints, index = `round(w × 7 / 255)`) |
+| `rgb` | detail | 4 | red, green, blue (from 0–7 each), height (from 0–31) |
+| `rgb` | preview | 6 | `PWV4`'s six bytes unchanged: [0] max amplitude, [1] min of a full-band measure, [2] another amplitude measure, [3] low, [4] mid, [5] high band maxima (mostly 0–127; how rekordbox combines them is open) |
+| `three_band` | both | 3 | low, mid, high (from 0–127; final levels, already smoothed, gain-adjusted and, for high, curved by rekordbox) |
+
+Decoders: `AnlzFile::waveform(style, resolution) -> Result<Option<Waveform>>` (missing section → `None`, corrupt → `Error::Corrupt`), `AnlzFile::three_band_gains()`, `anlz::waveform_file_extension(style, resolution)`.
 
 **Command** `get_waveform` (effect `read`):
 
@@ -56,13 +69,14 @@ The waveform agent chooses each style's per-column record layout, normalizing Pi
 { "track_id": 123, "style": "rgb", "resolution": "detail" }   // resolution: "preview" | "detail"
 // output
 { "track_id": 123, "style": "rgb", "resolution": "detail",
-  "columns": 45900, "columns_per_second": 150.0,
-  "bytes_per_column": 4, "data_base64": "…" }
+  "columns": 45909, "columns_per_second": 150.0,
+  "bytes_per_column": 4, "data_base64": "…",
+  "band_gains": null }   // three_band: { "low": 0.83, "mid": 1.13, "high": 1.03 }
 ```
 
-Reads the track's ANLZ files from `analysis_dir` on demand (nothing new stored in the library). A track without that analysis returns `NotFound` with a clear message. Must be fast: a few milliseconds for a 6-minute track.
+Reads the track's `ANLZ0000.DAT`/`.EXT`/`.2EX` from `analysis_dir` on demand (nothing new stored in the library). An unknown track, a track without analysis, a missing file or a missing section each return `NotFound` with a message saying which; a corrupt file is an `InvalidData` I/O error. Measured on a 306 s track (release build): 0.15–0.21 ms per detail waveform, 0.03 ms per preview, under 1 ms on a cold first read.
 
-**Done when:** decoders are unit-tested against synthetic files built in the tests, cross-checked by hand against real files in `.re/fixtures/` (decoded heights/colors plausible, column counts match track length × 150), and `research/waveforms.md` documents every layout we rely on.
+**Done when:** decoders are unit-tested against synthetic files built in the tests, cross-checked by hand against real files in `.re/fixtures/` (decoded heights/colors plausible, column counts match track length × 150), and `research/waveforms.md` documents every layout we rely on. All met.
 
 ## C. Audio engine and deck commands
 

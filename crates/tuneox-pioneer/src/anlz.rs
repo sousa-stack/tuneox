@@ -4,8 +4,17 @@
 //! `PMAI` header followed by tagged sections. Every section starts with a
 //! fourcc, its header length and its total length (big-endian u32s), so
 //! sections we don't understand can be skipped and kept verbatim.
+//!
+//! Waveforms are decoded by [`AnlzFile::waveform`] (in the `waveform`
+//! submodule); `research/waveforms.md` documents their layouts.
+
+mod waveform;
 
 use tuneox_core::{Beat, BeatGrid};
+
+pub use waveform::{
+    DETAIL_COLUMNS_PER_SECOND, narrow, waveform_file_extension, waveform_tag, widen,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -26,6 +35,8 @@ pub struct AnlzFile {
 /// One tagged section of an analysis file.
 pub struct Section<'a> {
     pub fourcc: [u8; 4],
+    /// Where the section starts in the file.
+    pub offset: usize,
     /// The section header, starting with the fourcc.
     pub header: &'a [u8],
     /// Everything after the header.
@@ -56,6 +67,7 @@ impl AnlzFile {
             let bytes = &self.data[start..start + total_len];
             Section {
                 fourcc: bytes[..4].try_into().unwrap(),
+                offset: start,
                 header: &bytes[..header_len],
                 body: &bytes[header_len..],
             }
@@ -191,7 +203,9 @@ fn be_u16(data: &[u8], at: usize) -> Option<u16> {
 mod tests {
     use super::*;
 
-    fn section(fourcc: &[u8; 4], header_fields: &[u8], body: &[u8]) -> Vec<u8> {
+    /// A section: fourcc, header length and total length, then the rest of
+    /// the header and the body.
+    pub(super) fn section(fourcc: &[u8; 4], header_fields: &[u8], body: &[u8]) -> Vec<u8> {
         let header_len = 12 + header_fields.len();
         let mut out = fourcc.to_vec();
         out.extend((header_len as u32).to_be_bytes());
@@ -201,7 +215,8 @@ mod tests {
         out
     }
 
-    fn file(sections: &[Vec<u8>]) -> Vec<u8> {
+    /// A whole analysis file: the `PMAI` header, then the sections.
+    pub(super) fn file(sections: &[Vec<u8>]) -> Vec<u8> {
         let body: Vec<u8> = sections.concat();
         let mut out = b"PMAI".to_vec();
         out.extend(28u32.to_be_bytes());

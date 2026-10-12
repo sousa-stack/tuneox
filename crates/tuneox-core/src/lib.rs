@@ -8,9 +8,11 @@ mod cue;
 mod key;
 mod playlist;
 mod track;
+mod waveform;
 
 pub use beatgrid::{Beat, BeatGrid};
 pub use cue::Cue;
 pub use key::{Mode, MusicalKey};
 pub use playlist::{Playlist, PlaylistId, PlaylistKind};
 pub use track::{FileType, Track, TrackColor, TrackId, TrackInfo};
+pub use waveform::{BandGains, Waveform, WaveformResolution, WaveformStyle};
