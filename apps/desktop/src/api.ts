@@ -110,7 +110,7 @@ export interface Progress {
   total: number;
 }
 
-function run<T>(name: string, input: object = {}): Promise<T> {
+export function run<T>(name: string, input: object = {}): Promise<T> {
   return invoke<T>("run_command", { name, input });
 }
 

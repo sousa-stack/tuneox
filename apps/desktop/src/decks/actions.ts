@@ -1,0 +1,339 @@
+// What the deck controls and keys do. Every action updates the screen at once
+// (an optimistic patch where the outcome is certain), sends the command, and
+// replaces the guess with the engine's state when the reply lands. Errors
+// show as toasts; nothing waits on the engine.
+
+import { positionAt, tempoFactor } from "./clock";
+import { commands, type MixerInput } from "./commands";
+import { FINE_JUMP_US, LOOP_SIZES, jumpBeats } from "./grid";
+import { settings, ZOOM_SPANS, DEFAULT_ZOOM } from "./settings";
+import { store } from "./store";
+import { toast } from "./toast";
+import type { BendDirection, DeckId, DeckState, MixerState } from "./types";
+
+const engineNow = () => store.clock.engineNow(performance.now());
+
+export function currentPosition(deck: DeckId): number {
+  return positionAt(store.deck(deck), engineNow());
+}
+
+/** A deck's state right now, optimistic changes included. */
+export function deckState(deck: DeckId): DeckState {
+  return store.deck(deck);
+}
+
+const loaded = (deck: DeckId) => store.deck(deck).track_id != null;
+
+/** The decks a transport action goes to: both with DUAL CONTROL on. */
+function targets(deck: DeckId): DeckId[] {
+  if (!settings.get().dualControl) return [deck];
+  return ([1, 2] as DeckId[]).filter((d) => d === deck || loaded(d));
+}
+
+function send(deck: DeckId, request: Promise<DeckState>, patch?: Partial<DeckState>): Promise<void> {
+  const id = patch ? store.patch(deck, patch) : 0;
+  return request
+    .then((state) => store.applyDeck(state))
+    .catch(toast)
+    .finally(() => id && store.unpatch(deck, id));
+}
+
+// ── Loading ─────────────────────────────────────────────────────────────────
+
+export function loadTrack(deck: DeckId, trackId: number): void {
+  send(deck, commands.load(deck, trackId), {
+    track_id: trackId,
+    loading: true,
+    error: null,
+    playing: false,
+    rate: 0,
+    position_us: 0,
+    cue_us: null,
+    loop: null,
+    last_loop: null,
+    loop_in_us: null,
+    hot_cues: [],
+    memory_cues: [],
+  });
+}
+
+/** Double-click in the browser: deck A unless it's playing, else deck B. */
+export function loadToFreeDeck(trackId: number): void {
+  loadTrack(store.deck(1).playing ? 2 : 1, trackId);
+}
+
+// ── Transport ───────────────────────────────────────────────────────────────
+
+function play(deck: DeckId) {
+  const state = store.deck(deck);
+  if (state.track_id == null) return;
+  send(deck, commands.play(deck), {
+    playing: true,
+    rate: state.loading && state.duration_us === 0 ? 0 : tempoFactor(state.tempo_percent),
+    position_us: currentPosition(deck),
+    at_ms: engineNow(),
+  });
+}
+
+function pause(deck: DeckId) {
+  if (!loaded(deck)) return;
+  send(deck, commands.pause(deck), { playing: false, rate: 0, position_us: currentPosition(deck), at_ms: engineNow() });
+}
+
+export function playPause(deck: DeckId): void {
+  const playing = store.deck(deck).playing;
+  for (const d of targets(deck)) (playing ? pause : play)(d);
+}
+
+export function cuePress(deck: DeckId): void {
+  for (const d of targets(deck)) if (loaded(d)) send(d, commands.cue(d, "press"));
+}
+
+export function cueRelease(deck: DeckId): void {
+  for (const d of targets(deck)) if (loaded(d)) send(d, commands.cue(d, "release"));
+}
+
+export function beatJump(deck: DeckId, direction: -1 | 1): void {
+  const beats = jumpBeats(settings.get().jump[deck - 1]);
+  for (const d of targets(deck)) {
+    if (!loaded(d)) continue;
+    if (beats === 0) seekTo(d, currentPosition(d) + direction * FINE_JUMP_US);
+    else send(d, commands.beatJump(d, direction * beats));
+  }
+}
+
+export function hotCuePress(deck: DeckId, slot: number): void {
+  if (loaded(deck)) send(deck, commands.hotCue(deck, slot, "press"));
+}
+
+export function hotCueRelease(deck: DeckId, slot: number): void {
+  if (loaded(deck)) send(deck, commands.hotCue(deck, slot, "release"));
+}
+
+export function memoryCue(deck: DeckId, target: number | "next" | "prev"): void {
+  const state = store.deck(deck);
+  if (state.track_id == null) return;
+  if (typeof target === "number" && target >= state.memory_cues.length) return;
+  send(deck, commands.memoryCue(deck, target));
+}
+
+// Seeks coalesce: while one is in flight only the latest target waits, so a
+// fast drag never queues up stale jumps.
+const seeks: { busy: boolean; next: number | null; patch: number }[] = [
+  { busy: false, next: null, patch: 0 },
+  { busy: false, next: null, patch: 0 },
+];
+
+export function seekTo(deck: DeckId, positionUs: number): void {
+  const state = store.deck(deck);
+  if (state.track_id == null) return;
+  const target = Math.max(0, state.duration_us > 0 ? Math.min(positionUs, state.duration_us) : positionUs);
+  const s = seeks[deck - 1];
+  if (s.patch) store.unpatch(deck, s.patch);
+  // Leaving the loop ends it (engine rule); show that at once too.
+  const leavesLoop = state.loop && (target < state.loop.start_us || target >= state.loop.end_us);
+  s.patch = store.patch(deck, { position_us: target, at_ms: engineNow(), ...(leavesLoop ? { loop: null } : {}) });
+  s.next = target;
+  pumpSeek(deck);
+}
+
+function pumpSeek(deck: DeckId) {
+  const s = seeks[deck - 1];
+  if (s.busy || s.next == null) return;
+  const target = s.next;
+  const patch = s.patch;
+  s.next = null;
+  s.patch = 0;
+  s.busy = true;
+  commands
+    .seek(deck, target)
+    .then((state) => store.applyDeck(state))
+    .catch(toast)
+    .finally(() => {
+      store.unpatch(deck, patch);
+      s.busy = false;
+      pumpSeek(deck);
+    });
+}
+
+// ── Loops ───────────────────────────────────────────────────────────────────
+
+export function loopIn(deck: DeckId): void {
+  if (loaded(deck)) send(deck, commands.loopIn(deck));
+}
+
+export function loopOut(deck: DeckId): void {
+  if (loaded(deck)) send(deck, commands.loopOut(deck));
+}
+
+/** R / RELOOP-EXIT: exits an active loop, else returns to the last one. */
+export function reloopExit(deck: DeckId): void {
+  const state = store.deck(deck);
+  if (state.track_id == null) return;
+  if (state.loop) send(deck, commands.loopExit(deck), { loop: null });
+  else send(deck, commands.reloop(deck));
+}
+
+export function beatLoop(deck: DeckId, beats: number): void {
+  if (loaded(deck)) send(deck, commands.loop(deck, beats));
+}
+
+/** The auto loop button: loops the selected size (the same size again exits). */
+export function autoLoop(deck: DeckId): void {
+  beatLoop(deck, settings.get().loopBeats[deck - 1]);
+}
+
+/** `<` / `>`: halves or doubles the loop size, and an active loop with it. */
+export function loopSize(deck: DeckId, factor: "half" | "double"): void {
+  const current = settings.get().loopBeats[deck - 1];
+  const index = LOOP_SIZES.indexOf(current);
+  const next = LOOP_SIZES[Math.max(0, Math.min(LOOP_SIZES.length - 1, index + (factor === "double" ? 1 : -1)))];
+  if (next !== undefined) settings.updateDeck("loopBeats", deck, next);
+  if (store.deck(deck).loop) send(deck, commands.loopResize(deck, factor));
+}
+
+// ── Tempo and sync ──────────────────────────────────────────────────────────
+
+export function toggleSync(deck: DeckId): void {
+  const state = store.deck(deck);
+  if (state.track_id == null) return;
+  const on = state.sync_mode === "off";
+  send(deck, commands.sync(deck, on), { sync_mode: on ? "beat" : "off" });
+}
+
+export function setMaster(deck: DeckId): void {
+  if (loaded(deck)) send(deck, commands.setMaster(deck), { master: true });
+}
+
+export function toggleQuantize(deck: DeckId): void {
+  const on = !store.deck(deck).quantize;
+  send(deck, commands.setQuantize(deck, on), { quantize: on });
+}
+
+export function tempoReset(deck: DeckId): void {
+  if (loaded(deck)) send(deck, commands.tempoReset(deck));
+}
+
+export function setBpm(deck: DeckId, bpm: number): void {
+  if (loaded(deck)) send(deck, commands.setBpm(deck, bpm));
+}
+
+function stepTempo(deck: DeckId, delta: number) {
+  const state = store.deck(deck);
+  if (state.track_id == null) return;
+  const range = state.tempo_range || 10;
+  const percent = Math.max(-range, Math.min(range, Math.round((state.tempo_percent + delta) * 10000) / 10000));
+  if (percent === state.tempo_percent) return;
+  const factor = tempoFactor(percent);
+  send(deck, commands.setTempo(deck, percent), {
+    tempo_percent: percent,
+    bpm: state.original_bpm != null ? state.original_bpm * factor : state.bpm,
+  });
+}
+
+/** −/+ hold: 0.02 % per step, 0.1 % once held 500 ms (rekordbox's EXPORT players). */
+const FINE_STEP = 0.02;
+const COARSE_STEP = 0.1;
+const COARSE_AFTER_MS = 500;
+const REPEAT_DELAY_MS = 300;
+const REPEAT_MS = 50;
+const repeaters = new Map<DeckId, ReturnType<typeof setTimeout>>();
+
+export function tempoStepPress(deck: DeckId, direction: -1 | 1): void {
+  tempoStepRelease(deck);
+  const start = performance.now();
+  stepTempo(deck, direction * FINE_STEP);
+  const tick = () => {
+    const held = performance.now() - start;
+    stepTempo(deck, direction * (held >= COARSE_AFTER_MS ? COARSE_STEP : FINE_STEP));
+    repeaters.set(deck, setTimeout(tick, REPEAT_MS));
+  };
+  repeaters.set(deck, setTimeout(tick, REPEAT_DELAY_MS));
+}
+
+export function tempoStepRelease(deck: DeckId): void {
+  const timer = repeaters.get(deck);
+  if (timer !== undefined) clearTimeout(timer);
+  repeaters.delete(deck);
+}
+
+export function pitchBend(deck: DeckId, direction: BendDirection, action: "press" | "release"): void {
+  if (loaded(deck)) send(deck, commands.pitchBend(deck, direction, action));
+}
+
+// ── View ────────────────────────────────────────────────────────────────────
+
+export function toggleTimeMode(deck: DeckId): void {
+  settings.updateDeck("timeMode", deck, settings.get().timeMode[deck - 1] === "remaining" ? "elapsed" : "remaining");
+}
+
+export function zoom(direction: -1 | 0 | 1): void {
+  settings.update((s) => ({
+    zoom: direction === 0 ? DEFAULT_ZOOM : Math.max(0, Math.min(ZOOM_SPANS.length - 1, s.zoom - direction)),
+  }));
+}
+
+// ── Mixer ───────────────────────────────────────────────────────────────────
+
+type MixerGroup = "1" | "2" | "global";
+interface MixerQueue {
+  /** Sent, not yet answered. */
+  inFlight: MixerInput | null;
+  /** Waiting for the one in flight. */
+  next: MixerInput | null;
+}
+const mixerQueues = new Map<MixerGroup, MixerQueue>();
+
+function applyLocally(input: MixerInput): void {
+  const m = store.mixer;
+  const next: MixerState = { ...m, channels: [{ ...m.channels[0] }, { ...m.channels[1] }] };
+  if (input.deck) {
+    const { deck, ...channel } = input;
+    Object.assign(next.channels[deck - 1], channel);
+  }
+  if (input.crossfader !== undefined) next.crossfader = input.crossfader;
+  if (input.master_volume !== undefined) next.master_volume = input.master_volume;
+  store.applyMixer(next);
+}
+
+/**
+ * The engine's mixer state (event or reply), with changes it hasn't applied
+ * yet kept on top, so a slow event never drags a fader back.
+ */
+export function applyEngineMixer(mixer: MixerState): void {
+  store.applyMixer(mixer);
+  for (const queue of mixerQueues.values()) {
+    if (queue.inFlight || queue.next) applyLocally({ ...queue.inFlight, ...queue.next });
+  }
+}
+
+/**
+ * Sets mixer values. Shown at once; while a change is in flight only the
+ * latest value per channel waits, so dragging a fader stays cheap.
+ */
+export function mixerSet(input: MixerInput): void {
+  applyLocally(input);
+  const group: MixerGroup = input.deck ? (String(input.deck) as MixerGroup) : "global";
+  const queue = mixerQueues.get(group) ?? { inFlight: null, next: null };
+  mixerQueues.set(group, queue);
+  queue.next = { ...queue.next, ...input };
+  pumpMixer(queue);
+}
+
+function pumpMixer(queue: MixerQueue) {
+  if (queue.inFlight || !queue.next) return;
+  const input = queue.next;
+  queue.next = null;
+  queue.inFlight = input;
+  commands
+    .mixer(input)
+    .then((mixer) => {
+      queue.inFlight = null;
+      applyEngineMixer(mixer);
+    })
+    .catch((e) => {
+      queue.inFlight = null;
+      toast(e);
+    })
+    .finally(() => pumpMixer(queue));
+}

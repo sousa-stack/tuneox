@@ -4,7 +4,22 @@ import { matcher, sortItems, toRow, type ColumnId, type Item, type Sort, type Tr
 import { Sidebar, type View } from "./components/Sidebar";
 import { TrackTable } from "./components/TrackTable";
 import { TrackDetail } from "./components/TrackDetail";
+import { DualPlayer } from "./components/decks/DualPlayer";
+import { Toasts, TrackMenu, type MenuRequest } from "./components/decks/Overlays";
+import { loadToFreeDeck } from "./decks/actions";
+import { beginTrackDrag } from "./decks/drag";
+import { useDeckEngine, useSettings } from "./decks/hooks";
+import { useDeckKeys } from "./decks/keyboard";
+import { settings as deckSettings } from "./decks/settings";
+import type { WaveformStyle } from "./decks/types";
 import "./App.css";
+import "./decks.css";
+
+const STYLES: [WaveformStyle, string][] = [
+  ["blue", "BLUE"],
+  ["rgb", "RGB"],
+  ["three_band", "3BAND"],
+];
 
 type Loading = { loaded: number; total: number } | null;
 
@@ -22,6 +37,11 @@ export default function App() {
   const [importing, setImporting] = useState<Progress | "starting" | null>(null);
   const [lastImport, setLastImport] = useState<ImportReport | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const [menu, setMenu] = useState<MenuRequest | null>(null);
+  const closeMenu = useCallback(() => setMenu(null), []);
+  const decks = useSettings();
+  useDeckEngine();
+  useDeckKeys();
 
   const load = useCallback(async () => {
     setLoading({ loaded: 0, total: 0 });
@@ -148,6 +168,36 @@ export default function App() {
               : "Loading…"
             : `${items.length.toLocaleString()} ${items.length === 1 ? "track" : "tracks"}`}
         </div>
+        <div className="toolbar-decks">
+          <div className="segmented" role="radiogroup" aria-label="Waveform colour">
+            {STYLES.map(([style, label]) => (
+              <button
+                key={style}
+                role="radio"
+                aria-checked={decks.style === style}
+                className={decks.style === style ? "on" : ""}
+                title="Waveform colour"
+                onClick={() => deckSettings.update({ style })}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button
+            className={`tool-toggle${decks.mixerOpen ? " on" : ""}`}
+            title="Show channel faders, EQ and master volume"
+            onClick={() => deckSettings.update((s) => ({ mixerOpen: !s.mixerOpen, decksVisible: true }))}
+          >
+            Mixer
+          </button>
+          <button
+            className={`tool-toggle${decks.decksVisible ? " on" : ""}`}
+            title="Show or hide the dual player"
+            onClick={() => deckSettings.update((s) => ({ decksVisible: !s.decksVisible }))}
+          >
+            Decks
+          </button>
+        </div>
       </header>
 
       {error && (
@@ -156,6 +206,8 @@ export default function App() {
           <button onClick={() => setError(null)}>Dismiss</button>
         </div>
       )}
+
+      {decks.decksVisible && <DualPlayer />}
 
       <div className="body">
         <Sidebar
@@ -186,12 +238,23 @@ export default function App() {
                   </span>
                 )}
               </div>
-              <TrackTable items={items} selectedId={selectedId} onSelect={setSelectedId} sort={sort} onSort={onSort} />
+              <TrackTable
+                items={items}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                sort={sort}
+                onSort={onSort}
+                onRowMouseDown={(row, e) => beginTrackDrag(row.id, [row.title, row.artist].filter(Boolean).join(" · "), e)}
+                onRowDoubleClick={loadToFreeDeck}
+                onRowContextMenu={(trackId, x, y) => setMenu({ trackId, x, y })}
+              />
             </>
           )}
         </main>
         {!empty && <TrackDetail trackId={selectedId} />}
       </div>
+      {menu && <TrackMenu request={menu} onClose={closeMenu} />}
+      <Toasts />
     </div>
   );
 }
