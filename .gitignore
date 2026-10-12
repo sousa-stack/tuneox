@@ -15,6 +15,9 @@ dist/
 # copies of rekordbox databases and real exports. Never commit any of it.
 /.re/
 
+# rekordbox database keys, compiled in at build time (see crates/tuneox-pioneer/build.rs)
+.keys.env
+
 # Local agent settings
 .claude/settings.local.json
 

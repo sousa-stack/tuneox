@@ -1,6 +1,6 @@
 # TuneOx
 
-An open-source DJ library manager and rekordbox alternative.
+An open-source DJ library manager and rekordbox alternative. [tuneox.com](https://tuneox.com)
 
 TuneOx imports your existing rekordbox library, analyzes your tracks, lets you prep cues and playlists, and exports USB drives that Pioneer DJ / AlphaTheta media players read natively.
 
@@ -8,7 +8,7 @@ TuneOx imports your existing rekordbox library, analyzes your tracks, lets you p
 
 ## Goals
 
-- **Works on every Pioneer player.** Exports write both device formats: the classic Device Library (`export.pdb`, `exportExt.pdb`, ANLZ analysis files) used by CDJ-900 through CDJ-3000 and XDJ units, and OneLibrary (`exportLibrary.db`) used by newer hardware.
+- **Works on every Pioneer player.** Every export writes both on-device library formats: Device Library (`export.pdb`), read by the CDJ-3000 and older players, and OneLibrary (`exportLibrary.db`), read by the CDJ-3000X, XDJ-AZ, OPUS-QUAD and OMNIS-DUO. One stick works on any player.
 - **No lag.** Setting a cue, scrolling a waveform or searching the library responds on the next frame. Disk writes never block the UI.
 - **Faster than rekordbox.** Fast startup, instant search across 100k+ tracks, and analysis that uses every CPU core.
 - **Your library comes with you.** Import tracks, playlists, cues, beatgrids and analysis from an existing rekordbox install without re-analyzing.
@@ -20,7 +20,7 @@ TuneOx imports your existing rekordbox library, analyzes your tracks, lets you p
 - Collection, playlists, smart playlists, tags, search
 - Analysis: BPM and beatgrid, key, waveforms (preview, detail, 3-band color)
 - Cue editor: hot cues, memory cues, loops, colors, comments
-- Export to USB: Device Library and OneLibrary, incremental sync
+- Export to USB: OneLibrary, then Device Library, with incremental sync
 
 **Milestone 2: Performance mode**
 - Decks, mixer, sync, key lock, FX, sampler

@@ -1,13 +1,13 @@
 # rekordbox `master.db` (local library)
 
-Observed on rekordbox 7.2.9 (macOS), against a real library of 10,361 tracks. Read with `crates/tuneox-pioneer/examples/masterdb_schema.rs` and `masterdb_query.rs`.
+Observed on rekordbox 7.2.9 (macOS), against a real library of 10,361 tracks. Read with `crates/tuneox-pioneer/examples/rbdb.rs`.
 
 ## Location and encryption
 
 - macOS: `~/Library/Pioneer/rekordbox/master.db`. rekordbox keeps rolling copies next to it (`master.backup.db`, `master.backup2.db`, `master.backup3.db`).
 - SQLCipher 4 with default settings. A single fixed key; the same key is used by rekordbox 6 and 7. Setting `PRAGMA key` and nothing else unlocks it.
 - No `-wal` / `-shm` files next to it while rekordbox is closed.
-- The key is **not** in this repo. Code takes it from the caller (`TUNEOX_MASTERDB_KEY` in the research examples). How the shipping app obtains it is an open decision.
+- The key is **not** in this repo. It's compiled in at build time from `TUNEOX_MASTERDB_KEY` (GitHub Actions secret, or the gitignored `.keys.env` locally). See `crates/tuneox-pioneer/src/keys.rs`.
 
 ## Conventions shared by every table
 

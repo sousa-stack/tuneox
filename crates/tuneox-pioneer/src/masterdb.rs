@@ -1,14 +1,18 @@
 //! The local rekordbox 6/7 library database, `master.db`.
 //!
 //! `master.db` is a SQLCipher database. TuneOx only imports from it, so it is
-//! always opened read-only. The caller supplies the key.
+//! always opened read-only.
 
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
 
+use crate::keys::{self, MissingKey};
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    MissingKey(#[from] MissingKey),
     #[error("could not unlock master.db: wrong key, or not a rekordbox database")]
     Locked,
     #[error(transparent)]
@@ -22,7 +26,12 @@ pub struct MasterDb {
 }
 
 impl MasterDb {
-    pub fn open(path: impl AsRef<Path>, key: &str) -> Result<Self> {
+    /// Opens `master.db` with the built-in key.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_key(path, keys::masterdb()?)
+    }
+
+    pub fn open_with_key(path: impl AsRef<Path>, key: &str) -> Result<Self> {
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,

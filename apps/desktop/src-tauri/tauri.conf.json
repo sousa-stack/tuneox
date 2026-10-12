@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TuneOx",
   "version": "0.1.0",
-  "identifier": "com.tuneox.app",
+  "identifier": "com.tuneox.desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",

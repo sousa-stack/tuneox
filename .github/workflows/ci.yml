@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: macos-latest
+    env:
+      # rekordbox database keys, compiled in by crates/tuneox-pioneer/build.rs.
+      # Empty on pull requests from forks; the build still succeeds without them.
+      TUNEOX_MASTERDB_KEY: ${{ secrets.TUNEOX_MASTERDB_KEY }}
+      TUNEOX_ONELIBRARY_KEY: ${{ secrets.TUNEOX_ONELIBRARY_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build frontend
+        working-directory: apps/desktop
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace

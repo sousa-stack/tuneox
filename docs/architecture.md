@@ -40,12 +40,14 @@ These are the reasons TuneOx should feel faster than rekordbox. Treat them as re
 
 Pioneer/AlphaTheta hardware reads one of two on-device library formats. TuneOx writes both so a single USB works everywhere.
 
-| Format | Files | Notes |
+| Format | Database | Read by |
 | --- | --- | --- |
-| Device Library | `PIONEER/rekordbox/export.pdb`, `exportExt.pdb`, `PIONEER/USBANLZ/**/ANLZ0000.DAT/.EXT/.2EX` | Paged binary database ("DeviceSQL") plus per-track analysis files. Read by CDJ-900 through CDJ-3000, XDJ series and most all-in-ones. |
-| OneLibrary (was "Device Library Plus") | `PIONEER/rekordbox/exportLibrary.db` | SQLCipher-encrypted SQLite. rekordbox 7 says AlphaTheta will adopt it gradually in new products. |
+| Device Library | `PIONEER/rekordbox/export.pdb` + `exportExt.pdb`, a paged binary database ("DeviceSQL") | CDJ-3000, CDJ-2000NXS2 and older, XDJ-XZ, XDJ-RX3, XDJ-RR, XDJ-1000MK2, XDJ-700 |
+| OneLibrary (was "Device Library Plus") | `PIONEER/rekordbox/exportLibrary.db`, SQLCipher-encrypted SQLite | CDJ-3000X, XDJ-AZ, OPUS-QUAD, OMNIS-DUO, and AlphaTheta's upcoming products |
 
-Which players need which format, and which ANLZ tags each player model actually uses, is tracked in `research/`.
+Both formats point at the same per-track analysis files (`PIONEER/USBANLZ/**/ANLZ0000.DAT/.EXT/.2EX`) and the same audio under `Contents/`. An export writes those once, then writes the two databases. Details, including what a real rekordbox stick contains, are in [research/usb-export.md](../research/usb-export.md).
+
+OneLibrary comes first in milestone 1: it's plain SQLite, so it's the quicker writer to get right, and it's what our main test player (an XDJ-AZ) reads. Device Library follows for the CDJ-3000 and older gear.
 
 Export is incremental. Each track has a content hash covering its metadata, cues, grid and analysis; only tracks whose hash changed get their ANLZ files rewritten or audio re-copied. The PDB is small and is regenerated on every sync.
 

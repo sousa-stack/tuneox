@@ -7,6 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/sousa-stack/tuneox"
+homepage = "https://tuneox.com"
 
 [workspace.dependencies]
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
