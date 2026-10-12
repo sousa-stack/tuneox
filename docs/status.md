@@ -48,7 +48,8 @@ _Last updated: 2026-10-12_
 
 **Decks: waveforms, preview player and dual player** (spec: [specs/decks.md](specs/decks.md))
 - Parts A (research), B (waveform data), C (audio engine + deck commands) and D (deck UI) are done; see above.
-- Left: the browser preview player (needs an engine preview voice), memory cue set/delete and hot cue delete, saving pad cues and A-GAIN trims to the library, key lock.
+- Being built now (one agent, full stack): cue colors/comments in deck state, saving cue edits and A-GAIN trims to the library (hot cue store/delete, memory cue set/delete), smooth scrubbing on the enlarged waveform, and the browser preview player (Preview column, pauses decks).
+- Then: hands-on QA of the decks in the real window (the screen was locked during the UI build), key lock (time-stretching).
 
 ## Next
 
