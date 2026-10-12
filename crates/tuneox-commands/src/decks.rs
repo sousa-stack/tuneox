@@ -6,6 +6,11 @@
 //! (`position_us` at `at_ms`, moving at `rate`) rather than a snapshot, so
 //! front ends animate the playhead themselves. The audio engine starts on
 //! the first command that needs it.
+//!
+//! Cue edits made on a deck are saved to the deck's track in the library,
+//! as rekordbox does: a hot cue stored from an empty pad, hot cue and memory
+//! cue deletes, memory cues set with MEMORY, and A-GAIN trims. Those
+//! commands are effect class `edit`; the rest are `playback`.
 
 use std::path::PathBuf;
 
@@ -13,9 +18,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tuneox_audio::{
     BendDirection, DeckState, Engine, LoadRequest, MemoryCueTarget, MixerSettingsUpdate,
-    MixerState, PlayerStatus, Source, SyncMode,
+    MixerState, PlayerStatus, PreviewRequest, PreviewState, ScrubAction, Source, SyncMode,
+    SyncPhase,
 };
-use tuneox_core::TrackId;
+use tuneox_core::{Cue, TrackId, TrackInfo};
 
 use crate::library::NoInput;
 use crate::{Command, Context, Effect, Error, Result};
@@ -71,6 +77,7 @@ macro_rules! deck_command {
             const NAME: &'static str = $name;
             const DESCRIPTION: &'static str = $description;
             const EFFECT: Effect = Effect::Playback;
+            const PLAYER: bool = true;
             type Input = DeckInput;
             type Output = DeckState;
 
@@ -98,40 +105,49 @@ pub struct DeckLoadInput {
 /// gains above +15 dB only for short sound effects.
 const MAX_TRACK_GAIN_DB: f64 = 12.0;
 
+/// The auto gain a library track plays at: its stored gain (rekordbox's
+/// analysis or a saved A-GAIN trim), capped.
+fn track_gain_db(info: &TrackInfo) -> Option<f32> {
+    info.auto_gain_db
+        .map(|db| db.clamp(-MAX_TRACK_GAIN_DB, MAX_TRACK_GAIN_DB) as f32)
+}
+
+/// A library track and its audio file.
+fn track_file(ctx: &Context, id: TrackId) -> Result<(TrackInfo, PathBuf)> {
+    let track = ctx
+        .library
+        .track(id)?
+        .ok_or_else(|| Error::NotFound(format!("track {id}")))?;
+    let path = PathBuf::from(&track.info.path);
+    if !path.is_file() {
+        return Err(Error::NotFound(format!(
+            "the audio file of track {id}: {}",
+            path.display()
+        )));
+    }
+    Ok((track.info, path))
+}
+
 impl Command for DeckLoad {
     const NAME: &'static str = "deck_load";
     const DESCRIPTION: &'static str = "Loads a library track onto deck 1 or 2 with its beat grid, hot cues (pads A–H) and memory cues. The deck parks at 0:00, paused, with no cue point and no loop; if it was sync master, master passes to the other deck. Returns at once while the file decodes in the background (`loading`); it can play as soon as audio is ready.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckLoadInput;
     type Output = DeckState;
 
     fn run(ctx: &mut Context, input: DeckLoadInput) -> Result<DeckState> {
         let deck = check_deck(input.deck)?;
         let id = input.track_id;
-        let track = ctx
-            .library
-            .track(id)?
-            .ok_or_else(|| Error::NotFound(format!("track {id}")))?;
-        let path = PathBuf::from(&track.info.path);
-        if !path.is_file() {
-            return Err(Error::NotFound(format!(
-                "the audio file of track {id}: {}",
-                path.display()
-            )));
-        }
+        let (info, path) = track_file(ctx, id)?;
         let request = LoadRequest {
             track_id: Some(id),
             source: Source::File(path),
             beat_grid: ctx.library.beat_grid(id)?,
             cues: ctx.library.cues(id)?,
-            bpm: track.info.bpm,
-            duration_secs: track.info.duration_secs,
-            auto_gain_db: input.auto_gain_db.or_else(|| {
-                track
-                    .info
-                    .auto_gain_db
-                    .map(|db| db.clamp(-MAX_TRACK_GAIN_DB, MAX_TRACK_GAIN_DB) as f32)
-            }),
+            bpm: info.bpm,
+            duration_secs: info.duration_secs,
+            auto_gain_db: input.auto_gain_db.or_else(|| track_gain_db(&info)),
         };
         Ok(ctx.engine()?.load(deck, request)?)
     }
@@ -160,6 +176,7 @@ impl Command for DeckCue {
     const NAME: &'static str = "deck_cue";
     const DESCRIPTION: &'static str = "The CUE button. Press while playing: jump back to the cue point (the start if none is set) and pause. Press while paused away from the cue point: set the cue point there (snapped to the beat with quantize). Press while paused at the cue point: play while held; release returns to the cue point and pauses, unless PLAY was pressed meanwhile.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckCueInput;
     type Output = DeckState;
 
@@ -182,15 +199,65 @@ pub struct DeckHotCueInput {
 
 impl Command for DeckHotCue {
     const NAME: &'static str = "deck_hot_cue";
-    const DESCRIPTION: &'static str = "A hot cue pad (slot 0 = A … 7 = H). A stored pad jumps there and plays, also from pause (with quantize while playing, keeping the beat phase); a hot loop starts looping. An empty pad stores the current position (snapped with quantize), or the playing loop as a hot loop; stored pads live in the player until the track is reloaded. With player_set_hot_cue_gate on, a pad pressed while paused plays only until released.";
-    const EFFECT: Effect = Effect::Playback;
+    const DESCRIPTION: &'static str = "A hot cue pad (slot 0 = A … 7 = H). A stored pad jumps there and plays, also from pause (with quantize while playing, keeping the beat phase); a hot loop starts looping. An empty pad stores the current position (snapped with quantize), or the playing loop as a hot loop, and saves it to the track in the library (as rekordbox does). With player_set_hot_cue_gate on, a pad pressed while paused plays only until released.";
+    // Pressing an empty pad saves a hot cue to the library.
+    const EFFECT: Effect = Effect::Edit;
+    const PLAYER: bool = true;
     type Input = DeckHotCueInput;
     type Output = DeckState;
 
     fn run(ctx: &mut Context, input: DeckHotCueInput) -> Result<DeckState> {
-        on_deck(ctx, input.deck, |e, d| {
-            e.hot_cue(d, input.slot, input.action.pressed())
-        })
+        let deck = check_deck(input.deck)?;
+        let engine = ctx.engine()?.clone();
+        let pressed = input.action.pressed();
+        let slot = input.slot;
+        let was_empty = pressed && !engine.deck(deck)?.hot_cues.iter().any(|c| c.slot == slot);
+        let state = engine.hot_cue(deck, slot, pressed)?;
+        if was_empty
+            && let (Some(track), Some(stored)) = (
+                state.track_id,
+                state.hot_cues.iter().find(|c| c.slot == slot),
+            )
+        {
+            let cue = Cue {
+                hot_cue: Some(slot),
+                start_us: stored.start_us,
+                end_us: stored.end_us,
+                color: stored.color,
+                comment: stored.comment.clone(),
+            };
+            ctx.library.add_cue(track, &cue)?;
+        }
+        Ok(state)
+    }
+}
+
+pub struct DeckHotCueDelete;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeckHotCueDeleteInput {
+    /// 1 or 2.
+    pub deck: u8,
+    /// Pad 0 = A … 7 = H.
+    pub slot: u8,
+}
+
+impl Command for DeckHotCueDelete {
+    const NAME: &'static str = "deck_hot_cue_delete";
+    const DESCRIPTION: &'static str = "Clears a hot cue pad (slot 0 = A … 7 = H) on a deck and deletes that hot cue from the track in the library. An empty pad is left alone.";
+    const EFFECT: Effect = Effect::Edit;
+    const PLAYER: bool = true;
+    type Input = DeckHotCueDeleteInput;
+    type Output = DeckState;
+
+    fn run(ctx: &mut Context, input: DeckHotCueDeleteInput) -> Result<DeckState> {
+        let deck = check_deck(input.deck)?;
+        let (state, removed) = ctx.engine()?.hot_cue_delete(deck, input.slot)?;
+        if let (Some(track), Some(_)) = (state.track_id, removed) {
+            ctx.library.delete_hot_cue(track, input.slot)?;
+        }
+        Ok(state)
     }
 }
 
@@ -233,6 +300,7 @@ impl Command for DeckMemoryCue {
     const NAME: &'static str = "deck_memory_cue";
     const DESCRIPTION: &'static str = "Calls a memory cue or memory loop: jumps there and pauses, and it becomes the cue point. A memory loop is armed, so deck_play loops it. Target an index in the deck's `memory_cues` (0 = earliest) or \"next\"/\"prev\" relative to the playhead.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckMemoryCueInput;
     type Output = DeckState;
 
@@ -244,6 +312,57 @@ impl Command for DeckMemoryCue {
             MemoryCueTargetInput::Step(MemoryCueStep::Prev) => MemoryCueTarget::Previous,
         };
         on_deck(ctx, input.deck, |e, d| e.memory_cue(d, target))
+    }
+}
+
+pub struct DeckMemoryCueSet;
+
+impl Command for DeckMemoryCueSet {
+    const NAME: &'static str = "deck_memory_cue_set";
+    const DESCRIPTION: &'static str = "rekordbox's MEMORY button: saves a memory cue on the deck and to the track in the library. During a loop it saves the loop as a memory loop; just after one (the loop was set after the cue point) the last loop; otherwise the cue point (set it with deck_cue while paused). Up to 10 per track, as in rekordbox; saving one that's already there changes nothing. Fails if there's no cue point or loop to save.";
+    const EFFECT: Effect = Effect::Edit;
+    const PLAYER: bool = true;
+    type Input = DeckInput;
+    type Output = DeckState;
+
+    fn run(ctx: &mut Context, input: DeckInput) -> Result<DeckState> {
+        let deck = check_deck(input.deck)?;
+        let (state, added) = ctx.engine()?.memory_cue_set(deck)?;
+        if let (Some(track), Some(cue)) = (state.track_id, added) {
+            ctx.library.add_cue(track, &cue)?;
+        }
+        Ok(state)
+    }
+}
+
+pub struct DeckMemoryCueDelete;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeckMemoryCueDeleteInput {
+    /// 1 or 2.
+    pub deck: u8,
+    /// The memory cue's `index` in the deck's `memory_cues` (0 = the
+    /// earliest).
+    pub index: u8,
+}
+
+impl Command for DeckMemoryCueDelete {
+    const NAME: &'static str = "deck_memory_cue_delete";
+    const DESCRIPTION: &'static str = "Deletes a memory cue or memory loop, by its index in the deck's `memory_cues` (0 = the earliest), from the deck and from the track in the library. The later ones move up an index.";
+    const EFFECT: Effect = Effect::Edit;
+    const PLAYER: bool = true;
+    type Input = DeckMemoryCueDeleteInput;
+    type Output = DeckState;
+
+    fn run(ctx: &mut Context, input: DeckMemoryCueDeleteInput) -> Result<DeckState> {
+        let deck = check_deck(input.deck)?;
+        let (state, removed) = ctx.engine()?.memory_cue_delete(deck, input.index)?;
+        if let Some(track) = state.track_id {
+            ctx.library
+                .delete_memory_cue(track, removed.start_us, removed.end_us)?;
+        }
+        Ok(state)
     }
 }
 
@@ -262,11 +381,61 @@ impl Command for DeckSeek {
     const NAME: &'static str = "deck_seek";
     const DESCRIPTION: &'static str = "Moves a deck's playhead (like needle search), keeping it playing or paused. Leaving an active loop ends it.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckSeekInput;
     type Output = DeckState;
 
     fn run(ctx: &mut Context, input: DeckSeekInput) -> Result<DeckState> {
         on_deck(ctx, input.deck, |e, d| e.seek(d, input.position_us))
+    }
+}
+
+pub struct DeckScrub;
+
+/// A phase of a scrub (dragging the waveform like a record).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrubActionInput {
+    /// Hand on the record (at `position_us`, or where the deck is).
+    Start,
+    /// Drag to `position_us`.
+    Move,
+    /// Let go (at `position_us`, or the last position dragged to).
+    End,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeckScrubInput {
+    /// 1 or 2.
+    pub deck: u8,
+    pub action: ScrubActionInput,
+    /// Microseconds from the start of the track. Required for "move".
+    pub position_us: Option<i64>,
+}
+
+impl Command for DeckScrub {
+    const NAME: &'static str = "deck_scrub";
+    const DESCRIPTION: &'static str = "Scrubs a deck like a record moved by hand (dragging the enlarged waveform): \"start\" puts the hand on it (a playing deck slows to a stop unless dragged), \"move\" drags it to `position_us`, \"end\" lets go. The audio follows the drag smoothly at the speed it moves (backwards too) without per-move fades; on \"end\" the deck plays on from there if it was playing, otherwise it rests there paused. A \"move\" without a \"start\" starts one. `scrubbing` is true in the state meanwhile.";
+    const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
+    type Input = DeckScrubInput;
+    type Output = DeckState;
+
+    fn run(ctx: &mut Context, input: DeckScrubInput) -> Result<DeckState> {
+        let action = match input.action {
+            ScrubActionInput::Start => ScrubAction::Start,
+            ScrubActionInput::Move => ScrubAction::Move,
+            ScrubActionInput::End => ScrubAction::End,
+        };
+        if action == ScrubAction::Move && input.position_us.is_none() {
+            return Err(Error::InvalidInput(
+                "a scrub \"move\" needs position_us".into(),
+            ));
+        }
+        on_deck(ctx, input.deck, |e, d| {
+            e.scrub(d, action, input.position_us)
+        })
     }
 }
 
@@ -286,6 +455,7 @@ impl Command for DeckBeatJump {
     const NAME: &'static str = "deck_beat_jump";
     const DESCRIPTION: &'static str = "Jumps a deck by a number of beats on its beat grid, keeping the beat phase. During a loop, the loop moves with it.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckBeatJumpInput;
     type Output = DeckState;
 
@@ -309,6 +479,7 @@ impl Command for DeckLoop {
     const NAME: &'static str = "deck_loop";
     const DESCRIPTION: &'static str = "Auto beat loop: loops `beats` beats (1/64–512) from the current position, snapped to the beat with quantize. The same size again exits the loop; another size resizes the active loop from its start.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckLoopInput;
     type Output = DeckState;
 
@@ -367,6 +538,7 @@ impl Command for DeckLoopResize {
     const DESCRIPTION: &'static str =
         "Doubles or halves the active loop, keeping its start, within 1/64–512 beats.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckLoopResizeInput;
     type Output = DeckState;
 
@@ -393,6 +565,7 @@ impl Command for DeckSetTempo {
     const NAME: &'static str = "deck_set_tempo";
     const DESCRIPTION: &'static str = "Sets a deck's tempo in percent (pitch follows tempo), clamped to its range (slider steps: 0.02 % at ±6, 0.04 % at ±10/±16, 0.5 % at WIDE; rekordbox's −/+ buttons step 0.02 %, 0.1 % when held) and to 40–499 BPM. Refused on a deck that's synced to another deck: only the master's tempo can change.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckSetTempoInput;
     type Output = DeckState;
 
@@ -416,6 +589,7 @@ impl Command for DeckSetBpm {
     const NAME: &'static str = "deck_set_bpm";
     const DESCRIPTION: &'static str = "Sets a deck's tempo by BPM, like typing it into rekordbox's BPM field. It must be 40–499 BPM and reachable within the deck's tempo range. Refused on a deck synced to another deck.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckSetBpmInput;
     type Output = DeckState;
 
@@ -446,6 +620,7 @@ impl Command for DeckSetTempoRange {
     const NAME: &'static str = "deck_set_tempo_range";
     const DESCRIPTION: &'static str = "Sets a deck's tempo fader range: 6, 10, 16 or 100 (WIDE) percent. The tempo is clamped to the new range.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckSetTempoRangeInput;
     type Output = DeckState;
 
@@ -469,6 +644,7 @@ impl Command for DeckPitchBend {
     const NAME: &'static str = "deck_pitch_bend";
     const DESCRIPTION: &'static str = "Pitch bend: while pressed, a playing deck runs 4 % slower (\"back\") or faster (\"forward\") to nudge it into phase; release ends it. Bending a beat-synced deck drops it to BPM-only sync (sync_mode \"bpm\") until sync is turned off and on again.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckPitchBendInput;
     type Output = DeckState;
 
@@ -505,6 +681,7 @@ impl Command for DeckSync {
     const NAME: &'static str = "deck_sync";
     const DESCRIPTION: &'static str = "Turns sync on or off for a deck. A synced deck matches the master deck's BPM (or half/double time) and, in beat mode, its beat phase; its own tempo controls are locked until sync is turned off, which keeps the synced tempo. With no master yet, the other deck becomes master if it's playing, otherwise this one.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckSyncInput;
     type Output = DeckState;
 
@@ -539,6 +716,7 @@ impl Command for DeckSetQuantize {
     const NAME: &'static str = "deck_set_quantize";
     const DESCRIPTION: &'static str = "Turns quantize on or off for one deck (on by default). With quantize, setting the cue, loop in/out, storing hot cues and auto loop starts snap to the nearest beat, and hot cue jumps while playing keep the beat phase.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = DeckSetQuantizeInput;
     type Output = DeckState;
 
@@ -559,11 +737,55 @@ impl Command for PlayerSetHotCueGate {
     const NAME: &'static str = "player_set_hot_cue_gate";
     const DESCRIPTION: &'static str = "rekordbox's \"Gate playback during Pause\" preference, for both decks (off by default). On: a hot cue pressed while paused plays only while held, then returns and pauses (hot loops still latch). Off: it jumps and plays.";
     const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
     type Input = PlayerSetHotCueGateInput;
     type Output = PlayerStatus;
 
     fn run(ctx: &mut Context, input: PlayerSetHotCueGateInput) -> Result<PlayerStatus> {
         Ok(ctx.engine()?.set_hot_cue_gate(input.on)?)
+    }
+}
+
+pub struct PlayerSetQuantizeValue;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerSetQuantizeValueInput {
+    /// 0.125, 0.25, 0.5 or 1 (beats).
+    pub beats: f64,
+}
+
+impl Command for PlayerSetQuantizeValue {
+    const NAME: &'static str = "player_set_quantize_value";
+    const DESCRIPTION: &'static str = "rekordbox's \"Quantize Beat Value\" preference, for both decks: 1/8, 1/4, 1/2 or 1 beat (`beats`: 0.125, 0.25, 0.5 or 1; default 1). On a deck with quantize on, setting the cue, loop in/out, storing a hot cue and auto loop starts snap to that resolution, and hot cue jumps while playing keep the phase at it. Beat jump sizes don't change.";
+    const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
+    type Input = PlayerSetQuantizeValueInput;
+    type Output = PlayerStatus;
+
+    fn run(ctx: &mut Context, input: PlayerSetQuantizeValueInput) -> Result<PlayerStatus> {
+        Ok(ctx.engine()?.set_quantize_beats(input.beats)?)
+    }
+}
+
+pub struct PlayerSetSyncPhase;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerSetSyncPhaseInput {
+    pub unit: SyncPhase,
+}
+
+impl Command for PlayerSetSyncPhase {
+    const NAME: &'static str = "player_set_sync_phase";
+    const DESCRIPTION: &'static str = "What beat sync aligns, for both decks: \"beat\" (default; rekordbox's BEAT SYNC aligns the beat phase only) or \"bar\" (a TuneOx extra: the synced deck's place in the bar matches the master's, downbeat to downbeat, by the beat grid's bar positions, moving it at most half a bar). BPM-only sync and half/double-time sync are unaffected (they keep beat alignment).";
+    const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
+    type Input = PlayerSetSyncPhaseInput;
+    type Output = PlayerStatus;
+
+    fn run(ctx: &mut Context, input: PlayerSetSyncPhaseInput) -> Result<PlayerStatus> {
+        Ok(ctx.engine()?.set_sync_phase(input.unit)?)
     }
 }
 
@@ -598,8 +820,10 @@ pub struct MixerSetInput {
 
 impl Command for MixerSet {
     const NAME: &'static str = "mixer_set";
-    const DESCRIPTION: &'static str = "Changes any of: a channel's (`deck` 1 or 2) low/mid/high kills (`kill_low`/`kill_mid`/`kill_high`, independent of the EQ), auto gain (`auto_gain_db`), fader (`volume`, 0–1) and 3-band EQ (`eq_low`/`eq_mid`/`eq_high` in dB, −80 kills, up to +6); the crossfader (−1 = deck 1 … 1 = deck 2); the master volume (0–1). Settings left out don't change; values are clamped to their ranges. rekordbox's DUAL PLAYER has only the kills, auto gain and crossfader.";
-    const EFFECT: Effect = Effect::Playback;
+    const DESCRIPTION: &'static str = "Changes any of: a channel's (`deck` 1 or 2) low/mid/high kills (`kill_low`/`kill_mid`/`kill_high`, independent of the EQ), auto gain (`auto_gain_db`), fader (`volume`, 0–1) and 3-band EQ (`eq_low`/`eq_mid`/`eq_high` in dB, −80 kills, up to +6); the crossfader (−1 = deck 1 … 1 = deck 2); the master volume (0–1). Settings left out don't change; values are clamped to their ranges. Like rekordbox, an `auto_gain_db` change is saved as the loaded track's auto gain in the library, so the track loads with it next time. rekordbox's DUAL PLAYER has only the kills, auto gain and crossfader.";
+    // An auto gain change on a loaded deck saves the trim to the library.
+    const EFFECT: Effect = Effect::Edit;
+    const PLAYER: bool = true;
     type Input = MixerSetInput;
     type Output = MixerState;
 
@@ -618,7 +842,69 @@ impl Command for MixerSet {
             crossfader: input.crossfader,
             master_volume: input.master_volume,
         };
-        Ok(ctx.engine()?.set_mixer(update)?)
+        let engine = ctx.engine()?.clone();
+        let mixer = engine.set_mixer(update)?;
+        // rekordbox saves a manual A-GAIN adjustment with the track.
+        if let (Some(deck), Some(_)) = (deck, input.auto_gain_db)
+            && let Some(track) = engine.deck(deck)?.track_id
+        {
+            let db = mixer.channels[deck as usize - 1].auto_gain_db as f64;
+            ctx.library
+                .set_auto_gain(track, Some((db * 100.0).round() / 100.0))?;
+        }
+        Ok(mixer)
+    }
+}
+
+pub struct PreviewPlay;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewPlayInput {
+    pub track_id: TrackId,
+    /// Where to start, in microseconds from the start of the track
+    /// (default 0).
+    pub position_us: Option<i64>,
+}
+
+impl Command for PreviewPlay {
+    const NAME: &'static str = "preview_play";
+    const DESCRIPTION: &'static str = "The browser's preview player (rekordbox's Preview column): plays a library track from `position_us` at its own auto gain through the master output, and pauses any deck that's playing. No tempo, sync, cues or loops. Previewing the track that's already in the player only moves its playhead. A deck starting to play stops the preview. Returns the preview's state (a clock like a deck's).";
+    const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
+    type Input = PreviewPlayInput;
+    type Output = PreviewState;
+
+    fn run(ctx: &mut Context, input: PreviewPlayInput) -> Result<PreviewState> {
+        let id = input.track_id;
+        let (info, path) = track_file(ctx, id)?;
+        let request = PreviewRequest {
+            track_id: Some(id),
+            source: Source::File(path),
+            position_us: input.position_us.unwrap_or(0).max(0),
+            duration_secs: info.duration_secs,
+            auto_gain_db: track_gain_db(&info),
+        };
+        Ok(ctx.engine()?.preview_play(request)?)
+    }
+}
+
+pub struct PreviewStop;
+
+impl Command for PreviewStop {
+    const NAME: &'static str = "preview_stop";
+    const DESCRIPTION: &'static str =
+        "Stops the browser's preview player (with a short fade). Decks it paused stay paused.";
+    const EFFECT: Effect = Effect::Playback;
+    const PLAYER: bool = true;
+    type Input = NoInput;
+    type Output = PreviewState;
+
+    fn run(ctx: &mut Context, _: NoInput) -> Result<PreviewState> {
+        Ok(match ctx.running_engine() {
+            Some(engine) => engine.preview_stop()?,
+            None => PreviewState::idle(),
+        })
     }
 }
 
@@ -626,8 +912,9 @@ pub struct GetPlayerStatus;
 
 impl Command for GetPlayerStatus {
     const NAME: &'static str = "player_status";
-    const DESCRIPTION: &'static str = "Both decks, the mixer, the hot cue gate setting and the audio output. Doesn't start the audio engine: before any deck command, it reports `running: false` and empty decks.";
+    const DESCRIPTION: &'static str = "Both decks, the mixer, the hot cue gate setting, the browser's preview player and the audio output. Doesn't start the audio engine: before any deck command, it reports `running: false` and empty decks.";
     const EFFECT: Effect = Effect::Read;
+    const PLAYER: bool = true;
     type Input = NoInput;
     type Output = PlayerStatus;
 
@@ -1109,6 +1396,310 @@ mod tests {
         ));
     }
 
+    /// (slot, start µs, end µs) of a track's cues in the library.
+    fn library_cues(ctx: &Context, track: i64) -> Vec<(Option<u8>, i64, Option<i64>)> {
+        ctx.library
+            .cues(track)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.hot_cue, c.start_us, c.end_us))
+            .collect()
+    }
+
+    #[test]
+    fn cue_edits_on_a_deck_are_saved_to_the_library() {
+        let Fixture {
+            _dir,
+            mut ctx,
+            engine,
+            track,
+            ..
+        } = fixture();
+        let ctx = &mut ctx;
+        run(ctx, "deck_load", json!({ "deck": 1, "track_id": track }));
+        engine
+            .wait_until_loaded(1, Duration::from_secs(10))
+            .unwrap();
+        let state = run(
+            ctx,
+            "deck_seek",
+            json!({ "deck": 1, "position_us": 2_000_000 }),
+        );
+        // Colours and comments come with the cues (none in this fixture).
+        assert_eq!(state["hot_cues"][0]["color"], Value::Null);
+        assert!(state["hot_cues"][0].get("comment").is_some());
+        assert!(state["memory_cues"][0].get("color").is_some());
+
+        // An empty pad stores and saves.
+        let state = run(
+            ctx,
+            "deck_hot_cue",
+            json!({ "deck": 1, "slot": 1, "action": "press" }),
+        );
+        assert_eq!(state["hot_cues"][1]["start_us"], 2_000_000);
+        run(
+            ctx,
+            "deck_hot_cue",
+            json!({ "deck": 1, "slot": 1, "action": "release" }),
+        );
+        // A stored pad only plays.
+        run(
+            ctx,
+            "deck_hot_cue",
+            json!({ "deck": 1, "slot": 0, "action": "press" }),
+        );
+        run(ctx, "deck_pause", json!({ "deck": 1 }));
+        assert_eq!(
+            library_cues(ctx, track),
+            [
+                (None, 1_000_000, None),
+                (None, 6_000_000, None),
+                (Some(0), 4_000_000, None),
+                (Some(1), 2_000_000, None),
+            ]
+        );
+
+        // Hot cue delete.
+        let state = run(ctx, "deck_hot_cue_delete", json!({ "deck": 1, "slot": 0 }));
+        assert_eq!(state["hot_cues"].as_array().unwrap().len(), 1);
+        run(ctx, "deck_hot_cue_delete", json!({ "deck": 1, "slot": 5 }));
+
+        // MEMORY saves the cue point (set by CUE while paused).
+        run(
+            ctx,
+            "deck_seek",
+            json!({ "deck": 1, "position_us": 8_000_000 }),
+        );
+        run(ctx, "deck_cue", json!({ "deck": 1, "action": "press" }));
+        run(ctx, "deck_cue", json!({ "deck": 1, "action": "release" }));
+        let state = run(ctx, "deck_memory_cue_set", json!({ "deck": 1 }));
+        assert_eq!(state["memory_cues"][2]["start_us"], 8_000_000);
+        // And a loop as a memory loop.
+        run(ctx, "deck_loop", json!({ "deck": 1, "beats": 4 }));
+        let state = run(ctx, "deck_memory_cue_set", json!({ "deck": 1 }));
+        assert_eq!(state["memory_cues"][3]["end_us"], 10_000_000);
+        // Memory cue delete (the earliest).
+        let state = run(
+            ctx,
+            "deck_memory_cue_delete",
+            json!({ "deck": 1, "index": 0 }),
+        );
+        assert_eq!(state["memory_cues"][0]["start_us"], 6_000_000);
+        assert_eq!(
+            library_cues(ctx, track),
+            [
+                (None, 6_000_000, None),
+                (None, 8_000_000, None),
+                (None, 8_000_000, Some(10_000_000)),
+                (Some(1), 2_000_000, None),
+            ]
+        );
+
+        // Reloading brings the edits back from the library.
+        run(ctx, "deck_load", json!({ "deck": 2, "track_id": track }));
+        let state = engine.deck(2).unwrap();
+        assert_eq!(state.hot_cues.len(), 1);
+        assert_eq!(state.hot_cues[0].slot, 1);
+        let starts: Vec<_> = state
+            .memory_cues
+            .iter()
+            .map(|c| (c.start_us, c.end_us))
+            .collect();
+        assert_eq!(
+            starts,
+            [
+                (6_000_000, None),
+                (8_000_000, None),
+                (8_000_000, Some(10_000_000))
+            ]
+        );
+
+        // Errors: no cue point or loop to save, an index that isn't there.
+        run(ctx, "deck_load", json!({ "deck": 1, "track_id": track }));
+        assert!(matches!(
+            run_json(ctx, "deck_memory_cue_set", json!({ "deck": 1 })),
+            Err(Error::Audio(tuneox_audio::Error::InvalidInput(_)))
+        ));
+        assert!(matches!(
+            run_json(
+                ctx,
+                "deck_memory_cue_delete",
+                json!({ "deck": 1, "index": 7 })
+            ),
+            Err(Error::Audio(tuneox_audio::Error::InvalidInput(_)))
+        ));
+    }
+
+    #[test]
+    fn a_gain_trims_are_saved_and_come_back() {
+        let Fixture {
+            _dir,
+            mut ctx,
+            engine,
+            track,
+            ..
+        } = fixture();
+        let ctx = &mut ctx;
+        let gain = |ctx: &Context| ctx.library.track(track).unwrap().unwrap().info.auto_gain_db;
+        // Nothing loaded: nothing to save.
+        run(ctx, "mixer_set", json!({ "deck": 1, "auto_gain_db": 3 }));
+        assert_eq!(gain(ctx), None);
+        run(ctx, "deck_load", json!({ "deck": 1, "track_id": track }));
+        assert_eq!(engine.mixer().channels[0].auto_gain_db, 0.0);
+        run(ctx, "mixer_set", json!({ "deck": 1, "auto_gain_db": -4.3 }));
+        assert_eq!(gain(ctx), Some(-4.3));
+        // Other mixer changes don't touch it.
+        run(
+            ctx,
+            "mixer_set",
+            json!({ "deck": 1, "kill_low": true, "crossfader": 0.5 }),
+        );
+        assert_eq!(gain(ctx), Some(-4.3));
+        // Reloading the track brings the trim back.
+        run(ctx, "deck_load", json!({ "deck": 2, "track_id": track }));
+        assert!((engine.mixer().channels[1].auto_gain_db + 4.3).abs() < 1e-6);
+        // So does previewing it.
+        let preview = run(ctx, "preview_play", json!({ "track_id": track }));
+        assert!((preview["auto_gain_db"].as_f64().unwrap() + 4.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn deck_scrub_drags_and_lets_go() {
+        let Fixture {
+            _dir,
+            mut ctx,
+            engine,
+            track,
+            ..
+        } = fixture();
+        let ctx = &mut ctx;
+        run(ctx, "deck_load", json!({ "deck": 1, "track_id": track }));
+        engine
+            .wait_until_loaded(1, Duration::from_secs(10))
+            .unwrap();
+        let state = run(
+            ctx,
+            "deck_scrub",
+            json!({ "deck": 1, "action": "start", "position_us": 0 }),
+        );
+        assert_eq!(state["scrubbing"], true);
+        assert_eq!(state["playing"], false);
+        for step in 1..=50 {
+            run(
+                ctx,
+                "deck_scrub",
+                json!({ "deck": 1, "action": "move", "position_us": step * 10_000 }),
+            );
+            render(&engine, 0.01);
+        }
+        let state = run(ctx, "deck_scrub", json!({ "deck": 1, "action": "end" }));
+        assert_eq!(state["scrubbing"], true, "settling");
+        render(&engine, 0.5);
+        let state = engine.deck(1).unwrap();
+        assert!(!state.scrubbing && !state.playing);
+        assert!(
+            (state.position_us - 500_000).abs() <= 1,
+            "{}",
+            state.position_us
+        );
+        assert!(matches!(
+            run_json(ctx, "deck_scrub", json!({ "deck": 1, "action": "move" })),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(
+            run_json(ctx, "deck_scrub", json!({ "deck": 1, "action": "fling" })),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn preview_plays_a_library_track_and_pauses_the_decks() {
+        let Fixture {
+            _dir,
+            mut ctx,
+            engine,
+            track,
+            no_grid,
+            missing,
+        } = fixture();
+        let ctx = &mut ctx;
+        // Stopping before anything started doesn't start the engine.
+        let mut idle = Context::new(Library::open_in_memory().unwrap(), None);
+        let state = run(&mut idle, "preview_stop", json!({}));
+        assert_eq!(state["playing"], false);
+        assert!(idle.running_engine().is_none());
+
+        run(ctx, "deck_load", json!({ "deck": 1, "track_id": track }));
+        engine
+            .wait_until_loaded(1, Duration::from_secs(10))
+            .unwrap();
+        run(ctx, "deck_play", json!({ "deck": 1 }));
+        let state = run(
+            ctx,
+            "preview_play",
+            json!({ "track_id": no_grid, "position_us": 5_000_000 }),
+        );
+        assert_eq!(state["track_id"], no_grid);
+        assert_eq!(state["playing"], true);
+        assert_eq!(state["position_us"], 5_000_000);
+        assert!(!engine.deck(1).unwrap().playing, "the deck paused");
+        engine
+            .wait_until_preview_loaded(Duration::from_secs(10))
+            .unwrap();
+        render(&engine, 0.25);
+        let status = run(ctx, "player_status", json!({}));
+        assert_eq!(status["preview"]["playing"], true);
+        assert_eq!(status["preview"]["position_us"], 5_250_000);
+        assert_eq!(status["preview"]["duration_us"], 20_000_000);
+        let state = run(ctx, "preview_stop", json!({}));
+        assert_eq!(state["playing"], false);
+        assert_eq!(state["track_id"], no_grid);
+        assert!(matches!(
+            run_json(ctx, "preview_play", json!({ "track_id": missing })),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            run_json(ctx, "preview_play", json!({ "track_id": 999 })),
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn quantize_value_and_sync_phase_are_player_settings() {
+        let Fixture {
+            _dir,
+            mut ctx,
+            track,
+            ..
+        } = fixture();
+        let ctx = &mut ctx;
+        let status = run(ctx, "player_status", json!({}));
+        assert_eq!(status["quantize_beats"], 1.0);
+        assert_eq!(status["sync_phase"], "beat");
+        let status = run(ctx, "player_set_quantize_value", json!({ "beats": 0.25 }));
+        assert_eq!(status["quantize_beats"], 0.25);
+        let status = run(ctx, "player_set_sync_phase", json!({ "unit": "bar" }));
+        assert_eq!(status["sync_phase"], "bar");
+        assert_eq!(status["quantize_beats"], 0.25);
+        // With ¼ beat quantize, CUE snaps to the nearest 125 ms at 120 BPM.
+        run(ctx, "deck_load", json!({ "deck": 1, "track_id": track }));
+        run(
+            ctx,
+            "deck_seek",
+            json!({ "deck": 1, "position_us": 2_130_000 }),
+        );
+        let state = run(ctx, "deck_cue", json!({ "deck": 1, "action": "press" }));
+        assert_eq!(state["cue_us"], 2_125_000);
+        assert!(matches!(
+            run_json(ctx, "player_set_quantize_value", json!({ "beats": 2 })),
+            Err(Error::Audio(tuneox_audio::Error::InvalidInput(_)))
+        ));
+        assert!(matches!(
+            run_json(ctx, "player_set_sync_phase", json!({ "unit": "phrase" })),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
     #[test]
     fn player_status_does_not_start_the_engine() {
         let library = Library::open_in_memory().unwrap();
@@ -1125,14 +1716,33 @@ mod tests {
     fn deck_commands_are_playback_commands() {
         let catalog = catalog();
         let effect = |name: &str| catalog.iter().find(|c| c.name == name).unwrap().effect;
+        // Commands that can save to the library are edits.
+        for name in [
+            "deck_hot_cue",
+            "deck_hot_cue_delete",
+            "deck_memory_cue_set",
+            "deck_memory_cue_delete",
+            "mixer_set",
+        ] {
+            assert_eq!(effect(name), Effect::Edit, "{name}");
+        }
+        // Every deck, mixer, preview and player command runs on the player.
+        for info in &catalog {
+            let player = ["deck_", "mixer_", "player_", "preview_"]
+                .iter()
+                .any(|prefix| info.name.starts_with(prefix));
+            assert_eq!(info.player, player, "{}", info.name);
+        }
         for name in [
             "deck_load",
             "deck_play",
             "deck_pause",
             "deck_cue",
-            "deck_hot_cue",
             "deck_memory_cue",
             "deck_seek",
+            "deck_scrub",
+            "preview_play",
+            "preview_stop",
             "deck_beat_jump",
             "deck_loop",
             "deck_loop_in",
@@ -1149,7 +1759,8 @@ mod tests {
             "deck_set_master",
             "deck_set_quantize",
             "player_set_hot_cue_gate",
-            "mixer_set",
+            "player_set_quantize_value",
+            "player_set_sync_phase",
         ] {
             assert_eq!(effect(name), Effect::Playback, "{name}");
         }

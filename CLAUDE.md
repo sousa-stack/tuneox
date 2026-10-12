@@ -71,7 +71,7 @@ cargo run -p tuneox-pioneer --example anlz_dump -- path/to/ANLZ0000.EXT         
 
 ## Conventions
 
-- **Commands.** A new feature adds a `Command` impl in `tuneox-commands` (typed input/output deriving `JsonSchema`, a description written for people and LLMs, an `Effect`), registered in `registry![…]`. The UI calls it through `api.ts` → `run_command`; don't add bespoke Tauri commands. Bulk binary data (e.g. waveforms) goes in command output as base64, not as JSON number arrays.
+- **Commands.** A new feature adds a `Command` impl in `tuneox-commands` (typed input/output deriving `JsonSchema`, a description written for people and LLMs, an `Effect`), registered in `registry![…]`. The UI calls it through `api.ts` → `run_command`; don't add bespoke Tauri commands. Bulk binary data (e.g. waveforms) goes in command output as base64, not as JSON number arrays. The effect class is honest: a command that can write the library is `edit`, even if it also plays. A command that acts on the audio engine (decks, mixer, preview, player settings) sets `const PLAYER: bool = true`; the desktop runs those on the player context.
 - **Units.** Positions inside a track are `i64` microseconds; per-beat tempos are BPM × 100; library timestamps are unix milliseconds.
 - **Errors.** Command failures are `tuneox_commands::Error`; the MCP server returns them as tool errors (`isError`) so models can self-correct.
 - **Tests.** New behavior gets tests. Fixtures are built by our own code inside the test (see `crates/tuneox-commands/src/import_rekordbox/tests.rs`, which builds a fake encrypted `master.db` and ANLZ file). Never commit real user databases, exports or audio.

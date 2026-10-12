@@ -6,7 +6,7 @@ import { positionAt } from "../clock";
 import { hotCues, memoryCues, type ShownCue } from "../cues";
 import { settings, ZOOM_SPANS } from "../settings";
 import { store } from "../store";
-import { trackData, type TrackData } from "../trackData";
+import { trackData } from "../trackData";
 import { DECKS, type DeckId, type DeckState } from "../types";
 import { DetailView, type LaneInput } from "./detail";
 import { OverviewView } from "./overview";
@@ -19,7 +19,6 @@ interface TimeDisplay {
 
 interface CueCache {
   state: DeckState | null;
-  details: TrackData["details"] | undefined;
   hot: (ShownCue | null)[];
   memory: ShownCue[];
 }
@@ -37,7 +36,7 @@ class Animator {
   private overviews: (OverviewView | null)[] = [null, null];
   private times: (TimeDisplay | null)[] = [null, null];
   private hud: HTMLElement | null = null;
-  private cues: CueCache[] = [0, 1].map(() => ({ state: null, details: undefined, hot: [], memory: [] }));
+  private cues: CueCache[] = [0, 1].map(() => ({ state: null, hot: [], memory: [] }));
   private raf = 0;
   private dirty = true;
   private stats = { work: 0, worst: 0, frames: 0, since: 0, tiles: 0 };
@@ -122,12 +121,10 @@ class Animator {
   private cuesFor(deck: DeckId): CueCache {
     const cache = this.cues[deck - 1];
     const state = store.view(deck).state;
-    const details = trackData.peek(state.track_id)?.details;
-    if (cache.state !== state || cache.details !== details) {
+    if (cache.state !== state) {
       cache.state = state;
-      cache.details = details;
-      cache.hot = hotCues(state, details ?? null);
-      cache.memory = memoryCues(state, details ?? null);
+      cache.hot = hotCues(state);
+      cache.memory = memoryCues(state);
     }
     return cache;
   }

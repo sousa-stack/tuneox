@@ -380,6 +380,85 @@ button {
   border-radius: 2px;
 }
 
+/* Preview column: play/stop and the overview thumbnail */
+
+.th.static:hover {
+  color: var(--muted);
+}
+
+.preview-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  min-width: 0;
+}
+
+.preview-btn {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--faint);
+  fill: currentColor;
+  cursor: default;
+}
+
+.tr:hover .preview-btn,
+.preview-btn:focus-visible {
+  color: var(--muted);
+}
+
+.preview-btn:hover {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.preview-btn.on {
+  color: var(--accent);
+}
+
+.preview-thumb {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 18px;
+  border-radius: 2px;
+  background: #000;
+  overflow: hidden;
+}
+
+.preview-thumb.none {
+  background: transparent;
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+
+.preview-thumb canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.preview-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: none;
+  width: 1px;
+  margin-left: -0.5px;
+  background: #ff0000;
+  pointer-events: none;
+}
+
+.preview-playhead.playing {
+  background: #e0e0e0;
+}
+
 .rating {
   color: #e8cc2e;
   font-size: 11px;

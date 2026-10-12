@@ -242,7 +242,14 @@ impl Mixer {
 
     /// Mixes the two decks' stereo signals into `out` (interleaved stereo).
     /// `decks[d]` is `(left, right)` for deck `d`, each `out.len() / 2` long.
-    pub(crate) fn process(&mut self, decks: [(&[f32], &[f32]); 2], out: &mut [f32]) {
+    /// `bus` (the preview player, already at its own gain) joins after the
+    /// channels, before the master volume.
+    pub(crate) fn process(
+        &mut self,
+        decks: [(&[f32], &[f32]); 2],
+        bus: (&[f32], &[f32]),
+        out: &mut [f32],
+    ) {
         let frames = out.len() / 2;
         out.fill(0.0);
         let xf = crossfader_gains(self.settings.crossfader);
@@ -300,11 +307,13 @@ impl Mixer {
         }
         let target_master = self.settings.master_volume.clamp(0.0, 1.0);
         let start_master = self.master;
+        let (bus_left, bus_right) = bus;
         for (i, frame) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let t = ((i + 1) as f32 / RAMP as f32).min(1.0);
             let g = start_master + (target_master - start_master) * t;
-            frame[0] = (frame[0] * g).clamp(-1.0, 1.0);
-            frame[1] = (frame[1] * g).clamp(-1.0, 1.0);
+            let (bl, br) = (bus_left[i], bus_right[i]);
+            frame[0] = ((frame[0] + bl) * g).clamp(-1.0, 1.0);
+            frame[1] = ((frame[1] + br) * g).clamp(-1.0, 1.0);
         }
         self.master = if frames >= RAMP {
             target_master

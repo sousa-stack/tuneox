@@ -9,6 +9,9 @@ export type KeyAction =
   | { kind: "cue" }
   | { kind: "beatJump"; direction: -1 | 1 }
   | { kind: "hotCue"; slot: number }
+  | { kind: "hotCueDelete"; slot: number }
+  | { kind: "memoryCueSet" }
+  | { kind: "memoryCueDelete" }
   | { kind: "loopIn" }
   | { kind: "loopOut" }
   | { kind: "reloopExit" }
@@ -67,6 +70,10 @@ function action(code: string): [KeyAction, boolean] | null {
       return [{ kind: "memoryCue", target: "next" }, false];
     case "KeyB":
       return [{ kind: "memoryCue", target: "prev" }, false];
+    case "KeyM":
+      return [{ kind: "memoryCueSet" }, false];
+    case "KeyX":
+      return [{ kind: "memoryCueDelete" }, false];
     case "KeyQ":
       return [{ kind: "quantize" }, false];
     case "KeyT":
@@ -93,8 +100,16 @@ function action(code: string): [KeyAction, boolean] | null {
   }
 }
 
-/** The deck action for a key, or null. ⌘/Ctrl/⌥ combinations are left to the app (⌘F etc.). */
+/**
+ * The deck action for a key, or null. ⌘1–3 (Ctrl on other systems; ⇧ for
+ * deck B) clear hot cues A–C; other ⌘/Ctrl/⌥ combinations are left to the
+ * app (⌘F etc.).
+ */
 export function bindKey(code: string, mods: Modifiers): KeyBinding | null {
+  const command = mods.metaKey !== mods.ctrlKey;
+  if (command && !mods.altKey && code in HOT_CUES) {
+    return { deck: mods.shiftKey ? 2 : 1, action: { kind: "hotCueDelete", slot: HOT_CUES[code] }, held: false };
+  }
   if (mods.metaKey || mods.ctrlKey || mods.altKey) return null;
   const found = action(code);
   if (!found) return null;

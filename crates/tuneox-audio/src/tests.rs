@@ -1605,11 +1605,574 @@ fn event_handler_receives_events() {
     let sink = seen.clone();
     engine.on_event(move |e| sink.lock().unwrap().push(e.clone()));
     engine.poll_events();
-    assert_eq!(seen.lock().unwrap().len(), 3);
+    // Two decks, the mixer and the preview player.
+    assert_eq!(seen.lock().unwrap().len(), 4);
     let json = serde_json::to_value(&seen.lock().unwrap()[0]).unwrap();
     assert_eq!(json["kind"], "deck");
     assert!(json["sent_at_ms"].is_number());
     assert!(json["position_us"].is_number());
+    let json = serde_json::to_value(&seen.lock().unwrap()[3]).unwrap();
+    assert_eq!(json["kind"], "preview");
+    assert_eq!(json["playing"], false);
+}
+
+// Cue editing --------------------------------------------------------------------
+
+#[test]
+fn cue_colours_and_comments_come_with_the_state() {
+    let engine = Engine::offline(RATE);
+    let cues = vec![
+        Cue {
+            color: Some(22),
+            comment: Some("drop".into()),
+            ..hot_cue(0, 4.0, None)
+        },
+        Cue {
+            color: Some(3),
+            comment: Some("intro".into()),
+            ..memory_cue(1.0)
+        },
+        memory_cue(2.0),
+    ];
+    click_deck(&engine, 1, 120.0, 0.0, cues);
+    let state = engine.deck(1).unwrap();
+    assert_eq!(state.hot_cues[0].color, Some(22));
+    assert_eq!(state.hot_cues[0].comment.as_deref(), Some("drop"));
+    assert_eq!(state.memory_cues[0].color, Some(3));
+    assert_eq!(state.memory_cues[0].comment.as_deref(), Some("intro"));
+    assert_eq!(state.memory_cues[1].color, None);
+    assert_eq!(state.memory_cues[1].comment, None);
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(json["hot_cues"][0]["color"], 22);
+    assert_eq!(json["memory_cues"][1]["comment"], serde_json::Value::Null);
+
+    // A pad stored on the deck has neither.
+    engine.seek(1, 8_000_000).unwrap();
+    let state = engine.hot_cue(1, 1, true).unwrap();
+    assert_eq!(state.hot_cues[1].start_us, 8_000_000);
+    assert_eq!(
+        (state.hot_cues[1].color, &state.hot_cues[1].comment),
+        (None, &None)
+    );
+    // Deleting a memory cue keeps the others' colours with them.
+    let (state, _) = engine.memory_cue_delete(1, 0).unwrap();
+    assert_eq!(state.memory_cues.len(), 1);
+    assert_eq!(state.memory_cues[0].start_us, 2_000_000);
+    assert_eq!(state.memory_cues[0].color, None);
+    assert_eq!(state.hot_cues[0].comment.as_deref(), Some("drop"));
+}
+
+#[test]
+fn hot_cues_can_be_deleted() {
+    let engine = Engine::offline(RATE);
+    let coloured = Cue {
+        color: Some(9),
+        ..hot_cue(1, 4.0, None)
+    };
+    click_deck(&engine, 1, 120.0, 0.0, vec![coloured]);
+    let (state, removed) = engine.hot_cue_delete(1, 1).unwrap();
+    assert!(state.hot_cues.is_empty());
+    let removed = removed.unwrap();
+    assert_eq!(
+        (removed.hot_cue, removed.start_us, removed.end_us),
+        (Some(1), 4_000_000, None)
+    );
+    // An empty pad has nothing to remove.
+    assert_eq!(engine.hot_cue_delete(1, 1).unwrap().1, None);
+    // The pad stores a new cue, without the old colour.
+    engine.seek(1, 3_000_000).unwrap();
+    let state = engine.hot_cue(1, 1, true).unwrap();
+    assert_eq!(state.hot_cues[0].start_us, 3_000_000);
+    assert_eq!(state.hot_cues[0].color, None);
+    assert!(matches!(
+        engine.hot_cue_delete(1, 8),
+        Err(Error::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn memory_cues_are_set_and_deleted() {
+    let engine = Engine::offline(RATE);
+    click_deck(&engine, 1, 120.0, 0.0, vec![memory_cue(6.0)]);
+    // A fresh deck has nothing to save.
+    assert!(matches!(
+        engine.memory_cue_set(1),
+        Err(Error::InvalidInput(_))
+    ));
+
+    // The cue point (set by CUE while paused, snapped to the beat).
+    engine.seek(1, 2_010_000).unwrap();
+    engine.cue(1, true).unwrap();
+    engine.cue(1, false).unwrap();
+    let (state, added) = engine.memory_cue_set(1).unwrap();
+    let added = added.unwrap();
+    assert_eq!(
+        (added.hot_cue, added.start_us, added.end_us),
+        (None, 2_000_000, None)
+    );
+    let starts: Vec<i64> = state.memory_cues.iter().map(|c| c.start_us).collect();
+    assert_eq!(starts, [2_000_000, 6_000_000]);
+    // Saving the same cue again adds nothing.
+    let (state, added) = engine.memory_cue_set(1).unwrap();
+    assert_eq!((added, state.memory_cues.len()), (None, 2));
+
+    // During a loop: the loop, as a memory loop.
+    engine.beat_loop(1, 4.0).unwrap();
+    let (state, added) = engine.memory_cue_set(1).unwrap();
+    assert_eq!(added.unwrap().end_us, Some(4_000_000));
+    assert_eq!(state.memory_cues[1].end_us, Some(4_000_000));
+
+    // Just after a loop (exited): still the loop, not the cue IN set.
+    engine.seek(1, 10_000_000).unwrap();
+    engine.loop_in(1).unwrap();
+    engine.seek(1, 11_000_000).unwrap();
+    engine.loop_out(1).unwrap();
+    engine.loop_exit(1).unwrap();
+    let (_, added) = engine.memory_cue_set(1).unwrap();
+    let added = added.unwrap();
+    assert_eq!(
+        (added.start_us, added.end_us),
+        (10_000_000, Some(11_000_000))
+    );
+    // A cue point set afterwards is newer: that's what MEMORY saves.
+    engine.seek(1, 14_000_000).unwrap();
+    engine.cue(1, true).unwrap();
+    engine.cue(1, false).unwrap();
+    let (state, added) = engine.memory_cue_set(1).unwrap();
+    assert_eq!(
+        (added.unwrap().start_us, state.memory_cues.len()),
+        (14_000_000, 5)
+    );
+
+    // Delete by index; the rest close up.
+    let (state, removed) = engine.memory_cue_delete(1, 0).unwrap();
+    assert_eq!((removed.start_us, removed.end_us), (2_000_000, None));
+    assert_eq!(state.memory_cues[0].start_us, 2_000_000);
+    assert_eq!(state.memory_cues[0].end_us, Some(4_000_000));
+    assert_eq!(state.memory_cues[0].index, 0);
+    assert!(matches!(
+        engine.memory_cue_delete(1, 9),
+        Err(Error::InvalidInput(_))
+    ));
+
+    // rekordbox's limit: 10 per track.
+    for second in 20..26 {
+        engine.seek(1, second * 1_000_000).unwrap();
+        engine.cue(1, true).unwrap();
+        engine.cue(1, false).unwrap();
+        engine.memory_cue_set(1).unwrap();
+    }
+    assert_eq!(engine.deck(1).unwrap().memory_cues.len(), 10);
+    engine.seek(1, 30_000_000).unwrap();
+    engine.cue(1, true).unwrap();
+    engine.cue(1, false).unwrap();
+    assert!(matches!(
+        engine.memory_cue_set(1),
+        Err(Error::InvalidInput(m)) if m.contains("10 memory cues")
+    ));
+}
+
+// Quantize resolution and bar sync --------------------------------------------------
+
+#[test]
+fn quantize_snaps_at_the_chosen_resolution() {
+    let engine = Engine::offline(RATE);
+    // 120 BPM: a beat is 500 ms, ¼ beat 125 ms, ⅛ beat 62.5 ms.
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+    assert_eq!(engine.status().quantize_beats, 1.0);
+    engine.seek(1, 2_130_000).unwrap();
+    assert_eq!(engine.cue(1, true).unwrap().cue_us, Some(2_000_000));
+    engine.cue(1, false).unwrap();
+
+    let status = engine.set_quantize_beats(0.25).unwrap();
+    assert_eq!(status.quantize_beats, 0.25);
+    engine.seek(1, 2_130_000).unwrap();
+    assert_eq!(engine.cue(1, true).unwrap().cue_us, Some(2_125_000));
+    engine.cue(1, false).unwrap();
+    // Loop in and out.
+    engine.seek(1, 3_070_000).unwrap();
+    assert_eq!(engine.loop_in(1).unwrap().loop_in_us, Some(3_125_000));
+    engine.seek(1, 3_880_000).unwrap();
+    let state = engine.loop_out(1).unwrap();
+    let lp = state.active_loop.unwrap();
+    assert_eq!((lp.start_us, lp.end_us), (3_125_000, 3_875_000));
+    engine.loop_exit(1).unwrap();
+    // Hot cue store.
+    engine.seek(1, 5_190_000).unwrap();
+    let state = engine.hot_cue(1, 0, true).unwrap();
+    assert_eq!(state.hot_cues[0].start_us, 5_250_000);
+    engine.hot_cue(1, 0, false).unwrap();
+    // The auto loop's start, at ⅛ beat.
+    engine.set_quantize_beats(0.125).unwrap();
+    engine.seek(1, 7_040_000).unwrap();
+    let lp = engine.beat_loop(1, 1.0).unwrap().active_loop.unwrap();
+    assert_eq!((lp.start_us, lp.end_us), (7_062_500, 7_562_500));
+    engine.loop_exit(1).unwrap();
+    // Beat jumps stay whole beats.
+    engine.seek(1, 8_010_000).unwrap();
+    assert_eq!(engine.beat_jump(1, 4.0).unwrap().position_us, 10_010_000);
+    assert!(matches!(
+        engine.set_quantize_beats(0.3),
+        Err(Error::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn hot_cue_jumps_keep_the_phase_at_the_quantize_resolution() {
+    for (beats, landing) in [(1.0, 10_200_000), (0.25, 9_950_000)] {
+        let engine = Engine::offline(RATE);
+        click_deck(&engine, 1, 120.0, 0.0, vec![hot_cue(0, 10.0, None)]);
+        engine.set_quantize_beats(beats).unwrap();
+        engine.seek(1, 2_200_000).unwrap();
+        engine.play(1).unwrap();
+        // 2.2 s is 200 ms past the beat at 2.0 s, and 50 ms before the
+        // quarter beat at 2.25 s.
+        let state = engine.hot_cue(1, 0, true).unwrap();
+        assert_near(state.position_us, landing, 1.0, "landing");
+    }
+}
+
+/// Where a deck is within its bar, in beats, for the test grids (first
+/// beat = a downbeat).
+fn bar_beat(position_us: i64, first_beat: f64, bpm: f64) -> f64 {
+    ((position_us as f64 / 1e6 - first_beat) * bpm / 60.0).rem_euclid(4.0)
+}
+
+#[test]
+fn bar_sync_aligns_downbeats_and_beat_sync_only_beats() {
+    for phase in [crate::SyncPhase::Beat, crate::SyncPhase::Bar] {
+        let engine = Engine::offline(RATE);
+        click_deck(&engine, 1, 120.0, 0.0, vec![]);
+        click_deck(&engine, 2, 126.0, 0.1, vec![]);
+        assert_eq!(
+            engine.set_sync_phase(phase).unwrap().sync_phase,
+            phase,
+            "reported"
+        );
+        engine.play(1).unwrap();
+        render(&engine, 1.3);
+        // Deck 2 waits on the 2nd beat of a bar; deck 1 is in its 3rd.
+        let start = 0.1 + 5.0 * 60.0 / 126.0;
+        engine.seek(2, us(start)).unwrap();
+        engine.sync(2, SyncMode::Beat).unwrap();
+        engine.play(2).unwrap();
+        render(&engine, 2.0);
+        let err = phase_error_ms(&engine, (0.0, 120.0), (0.1, 126.0));
+        assert!(err < 1.0, "{phase:?}: phase error {err} ms");
+        let bars = |engine: &Engine| {
+            let b1 = bar_beat(engine.deck(1).unwrap().position_us, 0.0, 120.0);
+            let b2 = bar_beat(engine.deck(2).unwrap().position_us, 0.1, 126.0);
+            let d = (b1 - b2).rem_euclid(4.0);
+            d.min(4.0 - d)
+        };
+        // How far sync moved deck 2 from where it would have played to.
+        let free = start + 2.0 * 120.0 / 126.0;
+        let moved = (engine.deck(2).unwrap().position_us as f64 / 1e6 - free) * 126.0 / 60.0;
+        match phase {
+            crate::SyncPhase::Bar => {
+                assert!(bars(&engine) < 0.002, "bar positions equal");
+                assert!(moved.abs() <= 2.0, "at most half a bar: {moved} beats");
+                // Staying in sync: the master jumps a beat, the slave follows
+                // to the same place in the bar.
+                engine.beat_jump(1, 1.0).unwrap();
+                render(&engine, 0.5);
+                assert!(bars(&engine) < 0.002, "still downbeat to downbeat");
+            }
+            crate::SyncPhase::Beat => {
+                let d = bars(&engine);
+                assert!(
+                    d > 0.99 && (d - d.round()).abs() < 0.002,
+                    "beats aligned, bars not: {d}"
+                );
+                assert!(moved.abs() < 0.5, "only the beat phase: {moved} beats");
+            }
+        }
+    }
+}
+
+// Scrubbing -----------------------------------------------------------------------
+
+/// The largest jump between neighbouring samples.
+fn max_step(signal: &[f32]) -> f32 {
+    signal
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0, f32::max)
+}
+
+fn rms(signal: &[f32]) -> f64 {
+    (signal.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / signal.len() as f64).sqrt()
+}
+
+/// Neighbouring samples of a 0.5 sine at 200 Hz differ by at most
+/// 2π·200·0.5/48000 ≈ 0.013 at normal speed: a click is far above that.
+const TONE_HZ: f64 = 200.0;
+const MAX_SMOOTH_STEP: f32 = 0.03;
+
+fn tone_deck(engine: &Engine) {
+    deck_one_only(engine);
+    engine
+        .load(
+            1,
+            samples(RATE, tones(RATE, 30.0, &[(TONE_HZ, 0.5)]), None, vec![]),
+        )
+        .unwrap();
+}
+
+/// Drags deck 1 at `speed` × normal for `seconds` the way the UI does (a
+/// move every 8 ms), rendering in between. Returns the left channel and the
+/// final target.
+fn drag(engine: &Engine, from: f64, speed: f64, seconds: f64, out: &mut Vec<f32>) -> f64 {
+    let chunk = 0.008;
+    let mut target = from;
+    for _ in 0..(seconds / chunk).round() as usize {
+        target += chunk * speed;
+        engine
+            .scrub(1, crate::ScrubAction::Move, Some(us(target)))
+            .unwrap();
+        out.extend(left(&render(engine, chunk)));
+    }
+    target
+}
+
+#[test]
+fn scrubbing_follows_the_drag_smoothly() {
+    let engine = Engine::offline(RATE);
+    tone_deck(&engine);
+    engine.seek(1, 5_000_000).unwrap();
+    let state = engine
+        .scrub(1, crate::ScrubAction::Start, Some(5_000_000))
+        .unwrap();
+    assert!(state.scrubbing && !state.playing);
+
+    // Dragged forward at normal speed for a second.
+    let mut out = Vec::new();
+    let target = drag(&engine, 5.0, 1.0, 1.0, &mut out);
+    let state = engine.deck(1).unwrap();
+    assert!((state.rate - 1.0).abs() < 0.15, "speed {}", state.rate);
+    assert_near(
+        state.position_us,
+        us(target - crate::deck::SCRUB_FOLLOW),
+        10_000.0,
+        "a little behind the hand",
+    );
+    // No fades per move: a steady level once up to speed (the tone's RMS
+    // is 0.354).
+    let window = (RATE as f64 / TONE_HZ) as usize;
+    for (i, w) in out[RATE as usize / 5..].chunks(window).enumerate() {
+        assert!(rms(w) > 0.3, "window {i}: level {}", rms(w));
+    }
+
+    // Let go: it comes to rest exactly where it was let go, paused, silent.
+    engine
+        .scrub(1, crate::ScrubAction::End, Some(us(target)))
+        .unwrap();
+    out.extend(left(&render(&engine, 0.5)));
+    let state = engine.deck(1).unwrap();
+    assert!(!state.scrubbing && !state.playing);
+    assert_eq!(state.rate, 0.0);
+    assert_near(state.position_us, us(target), 1.0, "at rest");
+    assert!(out[out.len() - 2000..].iter().all(|&s| s == 0.0));
+    // Never a click.
+    assert!(max_step(&out) < MAX_SMOOTH_STEP, "step {}", max_step(&out));
+    // Position kept moving forward smoothly: no jumps reported.
+    render(&engine, 0.2);
+    assert_eq!(engine.deck(1).unwrap().position_us, state.position_us);
+}
+
+#[test]
+fn scrubbing_a_playing_deck_plays_on_when_let_go() {
+    let engine = Engine::offline(RATE);
+    tone_deck(&engine);
+    engine.seek(1, 5_000_000).unwrap();
+    engine.play(1).unwrap();
+    let mut out = left(&render(&engine, 0.5));
+    let grabbed = engine.deck(1).unwrap().position_us as f64 / 1e6;
+    // Hand on the record at the playhead, then dragged backwards.
+    let state = engine.scrub(1, crate::ScrubAction::Start, None).unwrap();
+    assert!(state.scrubbing && state.playing, "PLAY stays latched");
+    let target = drag(&engine, grabbed, -1.0, 0.4, &mut out);
+    let state = engine.deck(1).unwrap();
+    assert!(state.rate < -0.7, "running backwards: {}", state.rate);
+    assert!(state.position_us < us(grabbed));
+
+    // Let go: playback takes over at the deck's tempo from about there.
+    engine
+        .scrub(1, crate::ScrubAction::End, Some(us(target)))
+        .unwrap();
+    out.extend(left(&render(&engine, 0.3)));
+    let state = engine.deck(1).unwrap();
+    assert!(state.playing && !state.scrubbing);
+    assert_eq!(state.rate, 1.0);
+    let expected = target + 0.3;
+    assert_near(state.position_us, us(expected), 60_000.0, "playing on");
+    assert!(max_step(&out) < MAX_SMOOTH_STEP, "step {}", max_step(&out));
+    // Full level again.
+    assert!(rms(&out[out.len() - 2400..]) > 0.34);
+}
+
+#[test]
+fn scrubbing_jumps_to_far_targets_and_ends_loops_it_leaves() {
+    let engine = Engine::offline(RATE);
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+    engine.seek(1, 4_000_000).unwrap();
+    engine.beat_loop(1, 4.0).unwrap();
+    engine.scrub(1, crate::ScrubAction::Start, None).unwrap();
+    // Inside the loop: it stays.
+    let state = engine
+        .scrub(1, crate::ScrubAction::Move, Some(5_000_000))
+        .unwrap();
+    assert!(state.active_loop.is_some());
+    // Far away: a jump rather than a race, and the loop ends.
+    let state = engine
+        .scrub(1, crate::ScrubAction::Move, Some(20_000_000))
+        .unwrap();
+    assert_eq!(state.position_us, 20_000_000);
+    assert!(state.active_loop.is_none());
+    // End without a scrub does nothing; end with one rests.
+    engine.scrub(1, crate::ScrubAction::End, None).unwrap();
+    render(&engine, 0.5);
+    let state = engine.deck(1).unwrap();
+    assert!(!state.scrubbing);
+    assert_near(state.position_us, 20_000_000, 1.0, "at rest");
+    let state = engine.scrub(1, crate::ScrubAction::End, None).unwrap();
+    assert!(!state.scrubbing);
+    assert!(matches!(
+        engine.scrub(2, crate::ScrubAction::Start, None),
+        Err(Error::NoTrack(2))
+    ));
+}
+
+// Preview player --------------------------------------------------------------------
+
+fn preview(samples: Vec<f32>, position_us: i64, gain: Option<f32>) -> crate::PreviewRequest {
+    crate::PreviewRequest {
+        track_id: Some(9),
+        source: Source::Samples {
+            sample_rate: RATE,
+            channels: 2,
+            samples,
+        },
+        position_us,
+        duration_secs: None,
+        auto_gain_db: gain,
+    }
+}
+
+#[test]
+fn the_preview_plays_at_its_gain_and_pauses_the_decks() {
+    let engine = Engine::offline(RATE);
+    two_tones(&engine);
+    let state = engine
+        .preview_play(preview(
+            tones(RATE, 10.0, &[(2000.0, 0.5)]),
+            3_000_000,
+            Some(-6.0),
+        ))
+        .unwrap();
+    assert!(state.playing);
+    assert_eq!(state.track_id, Some(9));
+    assert_eq!(state.position_us, 3_000_000);
+    assert_eq!(state.rate, 1.0);
+    assert_eq!(state.auto_gain_db, -6.0);
+    assert_eq!(state.duration_us, 10_000_000);
+    // Previewing pauses the decks (rekordbox).
+    assert!(!engine.deck(1).unwrap().playing);
+    assert!(!engine.deck(2).unwrap().playing);
+
+    let out = left(&render(&engine, 0.5));
+    let settled = &out[RATE as usize / 10..];
+    let expected = 0.5 * 10f64.powf(-6.0 / 20.0);
+    assert!((amplitude(settled, 2000.0, RATE) - expected).abs() < 0.005);
+    assert!(amplitude(settled, 440.0, RATE) < 1e-3, "deck 1 paused");
+    assert!(amplitude(settled, 1000.0, RATE) < 1e-3, "deck 2 paused");
+    let state = engine.preview();
+    assert_near(state.position_us, 3_500_000, 1.0, "after 0.5 s");
+    assert_eq!(engine.status().preview, state);
+
+    // The master volume applies (TUNEOX_MUTED silences previews too).
+    engine
+        .set_mixer(MixerSettingsUpdate {
+            master_volume: Some(0.0),
+            ..Default::default()
+        })
+        .unwrap();
+    let out = render(&engine, 0.1);
+    assert!(out[256..].iter().all(|&s| s == 0.0));
+    engine
+        .set_mixer(MixerSettingsUpdate {
+            master_volume: Some(1.0),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Stop: fades out, keeps the track and position.
+    let state = engine.preview_stop().unwrap();
+    assert!(!state.playing);
+    assert_eq!(state.rate, 0.0);
+    assert_eq!(state.track_id, Some(9));
+    let out = render(&engine, 0.1);
+    assert!(out[2 * FADE as usize..].iter().all(|&s| s == 0.0));
+    assert!(
+        out[..2 * FADE as usize].iter().any(|&s| s != 0.0),
+        "a fade, not a cut"
+    );
+}
+
+#[test]
+fn a_deck_starting_stops_the_preview() {
+    let engine = Engine::offline(RATE);
+    engine
+        .load(1, samples(RATE, noise(RATE, 5.0), None, vec![]))
+        .unwrap();
+    engine
+        .preview_play(preview(noise(RATE, 5.0), 0, None))
+        .unwrap();
+    render(&engine, 0.1);
+    assert!(engine.preview().playing);
+    engine.play(1).unwrap();
+    assert!(!engine.preview().playing, "one output: the deck wins");
+}
+
+#[test]
+fn the_preview_stops_at_the_end_and_reuses_decoded_files() {
+    let engine = Engine::offline(RATE);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tone.wav");
+    write_wav(&path, RATE, &tones(RATE, 2.0, &[(440.0, 0.5)]));
+    let request = |position_us| crate::PreviewRequest {
+        track_id: Some(3),
+        source: Source::File(path.clone()),
+        position_us,
+        duration_secs: None,
+        auto_gain_db: Some(2.0),
+    };
+    engine.preview_play(request(1_000_000)).unwrap();
+    let state = engine
+        .wait_until_preview_loaded(Duration::from_secs(10))
+        .unwrap();
+    assert!(!state.loading && state.error.is_none());
+    render(&engine, 0.5);
+    // Another spot in the same track: just a jump.
+    let load_id = lock(&engine.shared().preview).load_id;
+    let state = engine.preview_play(request(500_000)).unwrap();
+    assert_eq!(lock(&engine.shared().preview).load_id, load_id);
+    assert!(!state.loading);
+    assert_eq!(state.position_us, 500_000);
+    // Loading it onto a deck reuses the decoded audio.
+    let deck = engine.load(1, file(&path)).unwrap();
+    assert!(!deck.loading);
+    // It stops at the end.
+    render(&engine, 2.0);
+    let state = engine.preview();
+    assert!(!state.playing);
+    assert_eq!(state.position_us, 2_000_000);
+    let events = engine.poll_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Preview(p) if !p.state.playing))
+    );
 }
 
 // Real-time safety -------------------------------------------------------------
@@ -1648,8 +2211,22 @@ fn render_path_does_not_allocate() {
             gain_db: -3.0,
         }
     };
+    // Preview tracks, built off the audio thread too.
+    let preview_track = |load_id, seconds| crate::preview::PreviewTrack {
+        load_id,
+        pcm: std::sync::Arc::new(crate::pcm::TrackPcm::from_samples(
+            RATE,
+            2,
+            &noise(RATE, seconds),
+        )),
+        gain_db: -3.0,
+    };
+    let (preview_a, preview_b) = (preview_track(1, 5.0), preview_track(2, 3.0));
+    use crate::deck::ScrubPhase;
     let controls = vec![
         Control::Play(0),
+        Control::QuantizeBeats(0.25),
+        Control::SyncBars(true),
         Control::Sync {
             deck: 1,
             mode: SyncMode::Beat,
@@ -1704,6 +2281,51 @@ fn render_path_does_not_allocate() {
             deck: 0,
             target: crate::deck::MemoryTarget::Next,
         },
+        // Scrubbing inside the hot loop, then playing on.
+        Control::Scrub {
+            deck: 0,
+            phase: ScrubPhase::Start,
+            seconds: None,
+        },
+        Control::Scrub {
+            deck: 0,
+            phase: ScrubPhase::Move,
+            seconds: Some(4.5),
+        },
+        Control::Scrub {
+            deck: 0,
+            phase: ScrubPhase::Move,
+            seconds: Some(4.6),
+        },
+        Control::Scrub {
+            deck: 0,
+            phase: ScrubPhase::End,
+            seconds: Some(4.6),
+        },
+        Control::MemoryCueSet(0),
+        Control::MemoryCueDelete { deck: 0, index: 0 },
+        Control::HotCueDelete { deck: 0, slot: 3 },
+        // The preview: a track, a jump, another track (cross-fading from the
+        // first, which is then sent off to be freed), stop, play again.
+        Control::PreviewPlay {
+            track: Some(preview_a),
+            seconds: 1.0,
+        },
+        Control::PreviewPlay {
+            track: None,
+            seconds: 2.0,
+        },
+        Control::PreviewPlay {
+            track: Some(preview_b),
+            seconds: 0.5,
+        },
+        Control::PreviewStop,
+        Control::PreviewPlay {
+            track: None,
+            seconds: 0.0,
+        },
+        // Deck 1 plays again (the preview paused it), which stops the preview.
+        Control::Play(0),
         Control::Quantize { deck: 0, on: false },
         Control::Load {
             deck: 1,
@@ -1718,7 +2340,7 @@ fn render_path_does_not_allocate() {
     // Interleave queued commands with rendering, as the audio thread sees them.
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     let mut sound = false;
-    for block in 0..600 {
+    for block in 0..900 {
         if block % 20 == 0
             && let Some(control) = controls.next()
         {
@@ -1739,7 +2361,12 @@ fn render_path_does_not_allocate() {
     drop(core);
     let state = engine.deck(1).unwrap();
     assert!(state.playing && state.active_loop.is_some());
+    assert!(!state.scrubbing);
     assert_eq!(engine.mixer().channels[1].auto_gain_db, -3.0);
+    assert!(
+        !engine.preview().playing,
+        "deck 1 playing stopped the preview"
+    );
 }
 
 // Real device -------------------------------------------------------------------

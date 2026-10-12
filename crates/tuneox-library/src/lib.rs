@@ -23,6 +23,8 @@ const MIGRATIONS: &[&str] = &[
 pub enum Error {
     #[error("library was created by a newer TuneOx (schema {0}); update TuneOx to open it")]
     NewerSchema(i64),
+    #[error("there's no track {0} in the library")]
+    NoTrack(TrackId),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -296,6 +298,90 @@ impl Library {
         )?;
         let rows = stmt.query_map([playlist], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // Edits ------------------------------------------------------------------
+    //
+    // Single changes made in TuneOx (the decks, later the editor). Each one
+    // touches only what it names and bumps the track's `updated_at`. Imports
+    // use `Import` instead, which replaces a track's cues wholesale, so a
+    // re-import from rekordbox overwrites cues and gains edited here.
+
+    /// Adds one cue to a track, leaving its other cues alone. A hot cue
+    /// replaces whatever was in its slot.
+    pub fn add_cue(&self, track: TrackId, cue: &Cue) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        touch(&tx, track)?;
+        if let Some(slot) = cue.hot_cue {
+            tx.prepare_cached("DELETE FROM cue WHERE track_id = ?1 AND hot_cue = ?2")?
+                .execute(params![track, slot])?;
+        }
+        tx.prepare_cached(
+            "INSERT INTO cue (track_id, hot_cue, start_us, end_us, color, comment, source_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+        )?
+        .execute(params![
+            track,
+            cue.hot_cue,
+            cue.start_us,
+            cue.end_us,
+            cue.color,
+            cue.comment
+        ])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Deletes a track's hot cue in `slot` (0 = A … 7 = H). Returns whether
+    /// there was one.
+    pub fn delete_hot_cue(&self, track: TrackId, slot: u8) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        touch(&tx, track)?;
+        let deleted = tx
+            .prepare_cached("DELETE FROM cue WHERE track_id = ?1 AND hot_cue = ?2")?
+            .execute(params![track, slot])?;
+        tx.commit()?;
+        Ok(deleted > 0)
+    }
+
+    /// Deletes one of a track's memory cues or loops: the one starting at
+    /// `start_us`, preferring one that also ends at `end_us`. Returns
+    /// whether one matched.
+    pub fn delete_memory_cue(
+        &self,
+        track: TrackId,
+        start_us: i64,
+        end_us: Option<i64>,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        touch(&tx, track)?;
+        let deleted = tx
+            .prepare_cached(
+                "DELETE FROM cue WHERE id = (
+                     SELECT id FROM cue
+                     WHERE track_id = ?1 AND hot_cue IS NULL AND start_us = ?2
+                     ORDER BY end_us IS ?3 DESC, id LIMIT 1)",
+            )?
+            .execute(params![track, start_us, end_us])?;
+        tx.commit()?;
+        Ok(deleted > 0)
+    }
+
+    /// Sets a track's auto gain in dB (rekordbox saves a manual A-GAIN
+    /// trim the same way: it becomes the track's gain). Returns whether it
+    /// changed.
+    pub fn set_auto_gain(&self, track: TrackId, db: Option<f64>) -> Result<bool> {
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE track SET auto_gain_db = ?2, updated_at = ?3
+                 WHERE id = ?1 AND auto_gain_db IS NOT ?2",
+            )?
+            .execute(params![track, db, now_ms()])?;
+        if changed == 0 && self.track(track)?.is_none() {
+            return Err(Error::NoTrack(track));
+        }
+        Ok(changed > 0)
     }
 
     /// Folder holding a track's analysis files, if it has any.
@@ -630,6 +716,17 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Bumps a track's `updated_at`, failing if there's no such track.
+fn touch(tx: &Transaction, track: TrackId) -> Result<()> {
+    let found = tx
+        .prepare_cached("UPDATE track SET updated_at = ?2 WHERE id = ?1")?
+        .execute(params![track, now_ms()])?;
+    if found == 0 {
+        return Err(Error::NoTrack(track));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

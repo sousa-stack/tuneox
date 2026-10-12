@@ -1,5 +1,7 @@
-// Brief, non-blocking messages (command errors such as "only the master deck's
-// tempo can change while synced").
+// Brief, non-blocking messages (command errors such as "Deck B is synced to
+// Deck A…"), worded for the UI by `friendlyError`.
+
+import { friendlyError } from "./errors";
 
 export interface Toast {
   id: number;
@@ -18,7 +20,7 @@ function emit() {
 }
 
 export function toast(error: unknown): void {
-  const message = String(error instanceof Error ? error.message : error).replace(/^Error:\s*/, "");
+  const message = friendlyError(String(error instanceof Error ? error.message : error));
   // Holding a key can repeat the same refusal; show it once.
   const existing = toasts.find((t) => t.message === message);
   if (existing) toasts = toasts.filter((t) => t !== existing);

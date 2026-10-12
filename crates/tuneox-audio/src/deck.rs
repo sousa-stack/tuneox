@@ -1,5 +1,5 @@
 //! One deck: the loaded track, transport (CUE, hot cues, memory cues, loops,
-//! beat jump), tempo, and the resampling read head.
+//! beat jump), tempo, scrubbing, and the resampling read head.
 //!
 //! Positions are seconds from the start of the track (`f64`, ~1e-12 s
 //! resolution), independent of the file's sample rate. The read head
@@ -20,8 +20,11 @@ use crate::pcm::TrackPcm;
 pub use crate::state::SyncMode;
 
 pub const HOT_CUES: usize = 8;
-/// Memory cues a deck keeps (rekordbox allows 10 per track).
+/// Memory cues a deck can hold (imported tracks may have more than the 10
+/// rekordbox lets you save; see [`MAX_SAVED_MEMORY_CUES`]).
 pub const MEMORY_CUES: usize = 32;
+/// Memory cues and loops rekordbox allows per track: MEMORY refuses more.
+pub const MAX_SAVED_MEMORY_CUES: usize = 10;
 /// Auto beat loop and loop resize limits, in beats.
 pub const MIN_LOOP_BEATS: f64 = 1.0 / 64.0;
 pub const MAX_LOOP_BEATS: f64 = 512.0;
@@ -40,11 +43,67 @@ pub(crate) const FADE: u32 = 128;
 /// A nanosecond: far below a sample, far above `f64` rounding of positions.
 const WRAP_EPSILON: f64 = 1e-9;
 
+// Scrubbing: the read head chases the dragged position like a record moved
+// by hand. Its speed is the distance to the target over `SCRUB_FOLLOW`,
+// smoothed with time constant `SCRUB_SMOOTH`; FOLLOW = 4 × SMOOTH makes the
+// chase critically damped (no overshoot, settles in ~100 ms).
+
+/// Seconds of distance per unit of speed: the chase's proportional term.
+pub(crate) const SCRUB_FOLLOW: f64 = 0.040;
+/// Time constant of the speed smoothing, in seconds.
+pub(crate) const SCRUB_SMOOTH: f64 = 0.010;
+/// Fastest a scrubbed read head moves, × normal speed.
+pub(crate) const SCRUB_MAX_RATE: f64 = 32.0;
+/// A target further away than this is jumped to (with the usual fade).
+pub(crate) const SCRUB_JUMP_SECONDS: f64 = 2.0;
+/// Below this speed a scrubbed deck is silent (a held record): no DC, no
+/// rumble.
+const SCRUB_SILENT_RATE: f64 = 0.01;
+/// From this speed up a scrubbed deck plays at full level.
+const SCRUB_FULL_LEVEL_RATE: f64 = 0.25;
+/// A released scrub hands over to playback once its speed is this close
+/// (relative) to the deck's tempo.
+const SCRUB_HANDOVER: f64 = 0.002;
+/// A released scrub on a paused deck stops once this close to its target.
+const SCRUB_SETTLED_SECONDS: f64 = 2e-5;
+
 /// A stored cue point; with an end it's a loop.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HotCue {
     pub start: f64,
     pub end: Option<f64>,
+    /// Which library cue this is, as index + 1 into the deck's cue metadata
+    /// (colour and comment, kept off the audio thread). 0 for cues stored on
+    /// the deck.
+    pub tag: u32,
+}
+
+impl HotCue {
+    pub fn point(start: f64) -> Self {
+        Self {
+            start,
+            end: None,
+            tag: 0,
+        }
+    }
+
+    fn from_loop(lp: &Loop) -> Self {
+        Self {
+            start: lp.start,
+            end: Some(lp.end),
+            tag: 0,
+        }
+    }
+
+    /// The same cue or loop, to the millisecond.
+    pub(crate) fn same_place(&self, other: &HotCue) -> bool {
+        let ends = match (self.end, other.end) {
+            (None, None) => true,
+            (Some(a), Some(b)) => (a - b).abs() < SAME_POSITION,
+            _ => false,
+        };
+        ends && (self.start - other.start).abs() < SAME_POSITION
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,7 +145,7 @@ pub enum MemoryTarget {
 /// CUE (or a hot cue in gate mode) held while the deck was paused: plays
 /// until released, then returns.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Preview {
+struct Held {
     return_to: f64,
     button: Button,
 }
@@ -103,6 +162,30 @@ struct Tail {
     pos: f64,
     step: f64,
     remaining: u32,
+    /// Level it fades from (below 1 for a slowly scrubbed deck).
+    level: f32,
+}
+
+/// The deck being dragged like a record (`deck_scrub`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Scrub {
+    /// Where the hand has moved the record to.
+    target: f64,
+    /// Read head speed now, track seconds per second (negative backwards).
+    velocity: f64,
+    /// Output level for the current speed.
+    level: f32,
+    /// The hand let go: hand over to playback (if PLAY is latched) or come
+    /// to rest at the target.
+    released: bool,
+}
+
+/// What a scrub command does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrubPhase {
+    Start,
+    Move,
+    End,
 }
 
 /// Everything a deck needs from a load, built off the audio thread.
@@ -124,22 +207,29 @@ pub(crate) struct Deck {
 
     pub pos: f64,
     pub play_latched: bool,
-    preview: Option<Preview>,
+    held: Option<Held>,
     /// None until set: a freshly loaded deck has no cue.
     pub cue: Option<f64>,
     pub hot_cues: [Option<HotCue>; HOT_CUES],
+    /// Sorted by position, packed at the front.
     pub memory_cues: [Option<HotCue>; MEMORY_CUES],
     pub active_loop: Option<Loop>,
     /// The most recent loop, the target of RELOOP.
     pub last_loop: Option<Loop>,
+    /// The last loop was set after the cue point: MEMORY saves the loop.
+    loop_is_latest: bool,
     /// Loop in set with IN, waiting for OUT.
     pub loop_in: Option<f64>,
     pub at_end: bool,
+    scrub: Option<Scrub>,
 
     pub tempo_percent: f64,
     pub tempo_range: f64,
     pub sync: SyncMode,
     pub quantize: bool,
+    /// Quantize resolution in beats (rekordbox EXPORT's "Quantize Beat
+    /// Value": 1/8, 1/4, 1/2 or 1), the same on both decks.
+    pub quantize_beats: f64,
     /// −1 while bending back, +1 forward.
     pub bend: i8,
     /// Tempo factor without sync's phase correction or a pitch bend.
@@ -166,18 +256,21 @@ impl Default for Deck {
             grid: None,
             pos: 0.0,
             play_latched: false,
-            preview: None,
+            held: None,
             cue: None,
             hot_cues: [None; HOT_CUES],
             memory_cues: [None; MEMORY_CUES],
             active_loop: None,
             last_loop: None,
+            loop_is_latest: false,
             loop_in: None,
             at_end: false,
+            scrub: None,
             tempo_percent: 0.0,
             tempo_range: 10.0,
             sync: SyncMode::Off,
             quantize: true,
+            quantize_beats: 1.0,
             bend: 0,
             nominal_rate: 1.0,
             rate: 1.0,
@@ -196,9 +289,19 @@ impl Deck {
         self.pcm.is_some()
     }
 
-    /// Audio is moving: playing, or previewing a held CUE/hot cue.
+    /// Audio is moving: playing, or a held CUE/hot cue from pause.
     pub fn moving(&self) -> bool {
-        self.play_latched || self.preview.is_some()
+        self.play_latched || self.held.is_some()
+    }
+
+    /// Being dragged like a record.
+    pub fn scrubbing(&self) -> bool {
+        self.scrub.is_some()
+    }
+
+    /// The scrubbed read head's speed, if scrubbing.
+    pub fn scrub_velocity(&self) -> Option<f64> {
+        self.scrub.map(|s| s.velocity)
     }
 
     pub fn duration(&self) -> f64 {
@@ -219,6 +322,11 @@ impl Deck {
         })
     }
 
+    /// Memory cues and loops held now.
+    pub fn memory_cue_count(&self) -> usize {
+        self.memory_cues.iter().take_while(|c| c.is_some()).count()
+    }
+
     /// Replaces the track and parks at 0:00 with no cue and no loop (EXPORT
     /// mode doesn't jump to the first memory cue). Returns the old track so
     /// the caller can free it off the audio thread.
@@ -232,11 +340,13 @@ impl Deck {
         self.cue = None;
         self.pos = 0.0;
         self.play_latched = false;
-        self.preview = None;
+        self.held = None;
         self.active_loop = None;
         self.last_loop = None;
+        self.loop_is_latest = false;
         self.loop_in = None;
         self.at_end = false;
+        self.scrub = None;
         self.stalled = false;
         self.bend = 0;
         // The old track's audio is about to be freed: cut it rather than fade.
@@ -250,30 +360,41 @@ impl Deck {
     // Transport -----------------------------------------------------------
 
     pub fn play(&mut self) {
-        if self.preview.take().is_some() {
+        if self.held.take().is_some() {
             // PLAY while holding CUE: keep playing after release.
             self.play_latched = true;
             return;
         }
-        if self.play_latched || self.at_track_end() {
+        if self.play_latched || (self.at_track_end() && self.scrub.is_none()) {
             return;
         }
-        self.start_moving();
+        if self.scrub.is_none() {
+            self.start_moving();
+        }
+        // While scrubbing, PLAY only says what happens on release.
         self.play_latched = true;
     }
 
     pub fn pause(&mut self) {
-        if self.moving() {
-            self.stop_moving();
+        let pos = self.pos;
+        match &mut self.scrub {
+            // A released record stops where it is.
+            Some(scrub) if scrub.released => scrub.target = pos,
+            Some(_) => {}
+            None => {
+                if self.moving() {
+                    self.stop_moving();
+                }
+            }
         }
         self.play_latched = false;
-        self.preview = None;
+        self.held = None;
     }
 
     pub fn cue_press(&mut self) {
         if self.play_latched {
             self.cue_press_while_playing();
-        } else if self.preview.is_none() {
+        } else if self.held.is_none() {
             self.cue_press_while_paused();
         }
     }
@@ -290,18 +411,18 @@ impl Deck {
     fn cue_press_while_paused(&mut self) {
         match self.cue {
             Some(cue) if (self.pos - cue).abs() < SAME_POSITION => {
-                self.start_preview(cue, Button::Cue);
+                self.start_held(cue, Button::Cue);
             }
             _ => {
                 let cue = self.snap(self.pos);
-                self.cue = Some(cue);
+                self.set_cue(cue);
                 self.jump_to(cue);
             }
         }
     }
 
     pub fn cue_release(&mut self) {
-        self.end_preview(Button::Cue);
+        self.end_held(Button::Cue);
     }
 
     /// A hot cue pad. `gate`: the "Gate playback during Pause" preference.
@@ -323,24 +444,26 @@ impl Deck {
     /// the loop that's playing as a hot loop.
     fn hot_cue_store(&mut self, slot: usize) {
         self.hot_cues[slot] = Some(match self.active_loop.filter(|lp| lp.contains(self.pos)) {
-            Some(lp) => HotCue {
-                start: lp.start,
-                end: Some(lp.end),
-            },
-            None => HotCue {
-                start: self.snap(self.pos),
-                end: None,
-            },
+            Some(lp) => HotCue::from_loop(&lp),
+            None => HotCue::point(self.snap(self.pos)),
         });
+    }
+
+    /// Clears a pad (rekordbox's ✕ in the HOT CUE list, ⌘1–3).
+    pub fn hot_cue_delete(&mut self, slot: usize) {
+        if let Some(pad) = self.hot_cues.get_mut(slot) {
+            *pad = None;
+        }
     }
 
     /// Jump and keep playing. With quantize the jump keeps the beat phase:
     /// landing as far before/after the hot cue as the read head was from its
-    /// nearest beat, so a synced or beatmatched deck stays in time.
+    /// nearest grid position at the quantize resolution, so a synced or
+    /// beatmatched deck stays in time.
     fn hot_cue_press_while_playing(&mut self, hot_cue: HotCue) {
         let mut target = match (&self.grid, self.quantize) {
             (Some(grid), true) => {
-                let offset = crate::grid::wrap_phase(grid.beat_at(self.pos));
+                let offset = crate::grid::wrap_to(grid.beat_at(self.pos), self.quantize_beats);
                 grid.shift(hot_cue.start, offset)
             }
             _ => hot_cue.start,
@@ -360,11 +483,11 @@ impl Deck {
     fn hot_cue_press_while_paused(&mut self, hot_cue: HotCue) {
         self.activate_hot_loop(hot_cue);
         self.jump_to(hot_cue.start);
-        if !self.moving() {
+        if !self.moving() && self.scrub.is_none() {
             self.start_moving();
         }
         // Pressed while CUE was held: the hot cue takes over and latches.
-        self.preview = None;
+        self.held = None;
         self.play_latched = true;
     }
 
@@ -372,7 +495,7 @@ impl Deck {
     /// pause.
     fn hot_cue_press_gated(&mut self, slot: usize, hot_cue: HotCue) {
         self.jump_to(hot_cue.start);
-        self.start_preview(hot_cue.start, Button::HotCue(slot));
+        self.start_held(hot_cue.start, Button::HotCue(slot));
     }
 
     fn activate_hot_loop(&mut self, hot_cue: HotCue) {
@@ -382,7 +505,7 @@ impl Deck {
     }
 
     pub fn hot_cue_release(&mut self, slot: usize) {
-        self.end_preview(Button::HotCue(slot));
+        self.end_held(Button::HotCue(slot));
     }
 
     /// Jumps to a memory cue and pauses there; it becomes the cue point. A
@@ -399,13 +522,56 @@ impl Deck {
         };
         let Some(cue) = found else { return };
         self.pause();
-        self.cue = Some(cue.start);
+        self.set_cue(cue.start);
         match cue.end.filter(|&end| end > cue.start) {
             Some(end) => {
                 self.set_loop(Loop::new(cue.start, end));
                 self.jump_to(cue.start);
             }
             None => self.jump_to(cue.start),
+        }
+    }
+
+    /// What MEMORY saves. rekordbox: "the current cue, or the current loop
+    /// during or just after loop play". Here: the active loop; else the last
+    /// loop if it was set after the cue point (or there's no cue point);
+    /// else the cue point.
+    pub fn memory_cue_candidate(&self) -> Option<HotCue> {
+        match (self.active_loop, self.last_loop, self.cue) {
+            (Some(lp), _, _) => Some(HotCue::from_loop(&lp)),
+            (None, Some(lp), None) => Some(HotCue::from_loop(&lp)),
+            (None, Some(lp), Some(_)) if self.loop_is_latest => Some(HotCue::from_loop(&lp)),
+            (None, _, Some(cue)) => Some(HotCue::point(cue)),
+            (None, None, None) => None,
+        }
+    }
+
+    /// MEMORY: saves [`Self::memory_cue_candidate`] among the memory cues
+    /// (in position order). Nothing happens if there's nothing to save, the
+    /// same cue is already there, or the deck is full.
+    pub fn memory_cue_set(&mut self) {
+        let Some(cue) = self.memory_cue_candidate() else {
+            return;
+        };
+        let count = self.memory_cue_count();
+        let existing = &self.memory_cues[..count];
+        if count >= MEMORY_CUES || existing.iter().flatten().any(|c| c.same_place(&cue)) {
+            return;
+        }
+        let at = existing
+            .iter()
+            .position(|c| c.is_some_and(|c| c.start > cue.start))
+            .unwrap_or(count);
+        self.memory_cues.copy_within(at..count, at + 1);
+        self.memory_cues[at] = Some(cue);
+    }
+
+    /// Deletes the memory cue at `index` (position order).
+    pub fn memory_cue_delete(&mut self, index: usize) {
+        let count = self.memory_cue_count();
+        if index < count {
+            self.memory_cues.copy_within(index + 1..count, index);
+            self.memory_cues[count - 1] = None;
         }
     }
 
@@ -464,7 +630,7 @@ impl Deck {
         let t = self.snap(self.pos);
         self.active_loop = None;
         self.loop_in = Some(t);
-        self.cue = Some(t);
+        self.set_cue(t);
     }
 
     /// Manual loop OUT: loops from IN to here (snapped with quantize). With
@@ -521,9 +687,15 @@ impl Deck {
         self.active_loop = None;
     }
 
+    fn set_cue(&mut self, t: f64) {
+        self.cue = Some(t);
+        self.loop_is_latest = false;
+    }
+
     fn set_loop(&mut self, lp: Loop) {
         self.active_loop = Some(lp);
         self.last_loop = Some(lp);
+        self.loop_is_latest = true;
     }
 
     /// Sets a loop and, if the read head is already past its end, wraps it
@@ -534,6 +706,66 @@ impl Deck {
             let wrapped = lp.start + (self.pos - lp.start).rem_euclid(lp.len());
             self.jump_to(wrapped);
         }
+    }
+
+    // Scrubbing -----------------------------------------------------------
+
+    /// `deck_scrub`: the deck is dragged like a record. `Start` puts the
+    /// hand on it (a playing deck slows to a stop unless dragged on);
+    /// `Move` drags it to `target`; `End` lets go at `target`, after which
+    /// it plays on if PLAY is latched or comes to rest. `Move` without a
+    /// `Start` starts; `End` without one does nothing.
+    pub fn scrub(&mut self, phase: ScrubPhase, target: Option<f64>) {
+        let duration = self.duration();
+        let clamp = |t: f64| {
+            if self.pcm.as_ref().is_some_and(|p| p.is_done()) {
+                t.clamp(0.0, duration)
+            } else {
+                t.max(0.0)
+            }
+        };
+        let target = target.map(clamp);
+        match (phase, &mut self.scrub) {
+            (ScrubPhase::End, None) => return,
+            (ScrubPhase::End, Some(scrub)) => {
+                scrub.released = true;
+                if let Some(t) = target {
+                    scrub.target = t;
+                }
+            }
+            (_, Some(scrub)) => {
+                scrub.released = false;
+                if let Some(t) = target {
+                    scrub.target = t;
+                }
+            }
+            (_, None) => {
+                // The record was turning at the deck's speed (also under a
+                // held CUE / gated hot cue, which the hand takes over from:
+                // it won't play on when let go).
+                let moving = self.moving() && !self.stalled && self.audible;
+                self.held = None;
+                self.scrub = Some(Scrub {
+                    target: target.unwrap_or(self.pos),
+                    velocity: if moving { self.rate } else { 0.0 },
+                    level: if moving { 1.0 } else { 0.0 },
+                    released: false,
+                });
+            }
+        }
+        let Some(scrub) = self.scrub else { return };
+        if self
+            .active_loop
+            .is_some_and(|lp| !lp.contains(scrub.target))
+        {
+            // Dragging out of a loop ends it, like a seek.
+            self.active_loop = None;
+        }
+        if (scrub.target - self.pos).abs() > SCRUB_JUMP_SECONDS {
+            // Too far to race there: jump (with a fade) and chase from there.
+            self.jump_to(scrub.target);
+        }
+        self.at_end = false;
     }
 
     // Tempo ---------------------------------------------------------------
@@ -585,10 +817,11 @@ impl Deck {
 
     // Helpers -------------------------------------------------------------
 
-    /// Snaps to the nearest beat when quantize is on and there's a grid.
+    /// Snaps to the grid at the quantize resolution when quantize is on and
+    /// there's a grid.
     fn snap(&self, t: f64) -> f64 {
         match (&self.grid, self.quantize) {
-            (Some(grid), true) => grid.nearest_beat(t).max(0.0),
+            (Some(grid), true) => grid.nearest(t, self.quantize_beats).max(0.0),
             _ => t,
         }
     }
@@ -597,12 +830,16 @@ impl Deck {
         self.pcm.as_ref().is_some_and(|p| p.is_done()) && self.pos >= self.duration()
     }
 
-    /// Moves the read head. Leaving the active loop ends it.
+    /// Moves the read head. Leaving the active loop ends it. While
+    /// scrubbing, the scrub's target moves too.
     pub fn jump_to(&mut self, t: f64) {
         let duration = self.duration();
         let mut t = t.max(0.0);
         if self.pcm.as_ref().is_some_and(|p| p.is_done()) {
             t = t.min(duration);
+        }
+        if let Some(scrub) = &mut self.scrub {
+            scrub.target = t;
         }
         if (t - self.pos).abs() < 1e-9 {
             return;
@@ -615,6 +852,7 @@ impl Deck {
                 pos: self.pos,
                 step: self.last_step,
                 remaining: FADE,
+                level: self.scrub.map_or(1.0, |s| s.level),
             });
             self.fade_in = FADE;
         }
@@ -636,25 +874,26 @@ impl Deck {
                 pos: self.pos,
                 step: self.last_step,
                 remaining: FADE,
+                level: 1.0,
             });
         }
         self.audible = false;
     }
 
-    fn start_preview(&mut self, return_to: f64, button: Button) {
+    fn start_held(&mut self, return_to: f64, button: Button) {
         if !self.moving() {
             self.start_moving();
         }
-        self.preview = Some(Preview { return_to, button });
+        self.held = Some(Held { return_to, button });
     }
 
-    fn end_preview(&mut self, button: Button) {
-        let Some(preview) = self.preview.filter(|p| p.button == button) else {
+    fn end_held(&mut self, button: Button) {
+        let Some(held) = self.held.filter(|p| p.button == button) else {
             return;
         };
         self.stop_moving();
-        self.preview = None;
-        self.jump_to(preview.return_to);
+        self.held = None;
+        self.jump_to(held.return_to);
     }
 
     // Rendering -----------------------------------------------------------
@@ -696,13 +935,14 @@ impl Deck {
         };
         let step = self.rate / device_rate;
         let moving = self.moving();
+        let smoothing = 1.0 - (-1.0 / (SCRUB_SMOOTH * device_rate)).exp();
         let mut ended = false;
         self.stalled = false;
 
         for i in 0..left.len() {
             let (mut l, mut r) = (0.0, 0.0);
             if let Some(tail) = &mut self.tail {
-                let gain = tail.remaining as f32 / FADE as f32;
+                let gain = tail.level * tail.remaining as f32 / FADE as f32;
                 let (tl, tr) = read(pcm, sample_rate, readable, tail.pos);
                 l += tl * gain;
                 r += tr * gain;
@@ -712,7 +952,11 @@ impl Deck {
                     self.tail = None;
                 }
             }
-            if moving && !ended && !self.stalled {
+            if self.scrub.is_some() {
+                let (sl, sr) = self.render_scrub_sample(pcm, readable, end, device_rate, smoothing);
+                l += sl;
+                r += sr;
+            } else if moving && !ended && !self.stalled {
                 let frame = (self.pos * sample_rate).floor();
                 if !done && frame + 3.0 > readable as f64 {
                     // The decoder hasn't got here yet: wait for it.
@@ -747,7 +991,7 @@ impl Deck {
                         self.pos = end;
                         self.at_end = true;
                         self.play_latched = false;
-                        self.preview = None;
+                        self.held = None;
                         self.audible = false;
                         ended = true;
                     }
@@ -756,16 +1000,79 @@ impl Deck {
             left[i] = l;
             right[i] = r;
         }
-        if !moving {
+        if !self.moving() && self.scrub.is_none() {
             self.audible = false;
         }
         ended
+    }
+
+    /// One output sample of a scrubbed deck: the read head's speed chases
+    /// the target (critically damped), the level follows the speed, and a
+    /// released scrub hands over to playback or settles on its target.
+    #[inline]
+    fn render_scrub_sample(
+        &mut self,
+        pcm: &TrackPcm,
+        readable: usize,
+        end: f64,
+        device_rate: f64,
+        smoothing: f64,
+    ) -> (f32, f32) {
+        let Some(mut scrub) = self.scrub else {
+            return (0.0, 0.0);
+        };
+        let sample_rate = pcm.sample_rate() as f64;
+        let resume = scrub.released && self.play_latched;
+        let desired = if resume {
+            self.rate
+        } else {
+            ((scrub.target - self.pos) / SCRUB_FOLLOW).clamp(-SCRUB_MAX_RATE, SCRUB_MAX_RATE)
+        };
+        scrub.velocity += (desired - scrub.velocity) * smoothing;
+        scrub.level = ((scrub.velocity.abs() - SCRUB_SILENT_RATE)
+            / (SCRUB_FULL_LEVEL_RATE - SCRUB_SILENT_RATE))
+            .clamp(0.0, 1.0) as f32;
+        let fade = 1.0 - self.fade_in as f32 / FADE as f32;
+        self.fade_in = self.fade_in.saturating_sub(1);
+        let gain = scrub.level * fade;
+        let (sl, sr) = if gain > 0.0 {
+            let (a, b) = read(pcm, sample_rate, readable, self.pos);
+            (a * gain, b * gain)
+        } else {
+            (0.0, 0.0)
+        };
+        let step = scrub.velocity / device_rate;
+        self.last_step = step;
+        self.audible = scrub.level > 0.0;
+        self.pos = (self.pos + step).clamp(0.0, end);
+
+        let handed_over = resume
+            && (scrub.velocity - self.rate).abs() <= SCRUB_HANDOVER * self.rate.abs().max(1e-3);
+        let settled = scrub.released
+            && !self.play_latched
+            && scrub.velocity.abs() < SCRUB_SILENT_RATE
+            && (scrub.target - self.pos).abs() < SCRUB_SETTLED_SECONDS;
+        if handed_over {
+            // Playback takes over from here at the deck's tempo, already
+            // audible: no fade.
+            self.scrub = None;
+            self.audible = true;
+            self.fade_in = 0;
+        } else if settled {
+            // Silent already (below the silent speed): rest on the target.
+            self.scrub = None;
+            self.pos = scrub.target;
+            self.audible = false;
+        } else {
+            self.scrub = Some(scrub);
+        }
+        (sl, sr)
     }
 }
 
 /// The track at `t` seconds, cubic-interpolated.
 #[inline]
-fn read(pcm: &TrackPcm, sample_rate: f64, readable: usize, t: f64) -> (f32, f32) {
+pub(crate) fn read(pcm: &TrackPcm, sample_rate: f64, readable: usize, t: f64) -> (f32, f32) {
     let x = t * sample_rate;
     let base = x.floor();
     let frac = (x - base) as f32;

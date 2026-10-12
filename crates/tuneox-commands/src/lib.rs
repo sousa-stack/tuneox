@@ -22,14 +22,17 @@ use tuneox_library::Library;
 
 pub use decks::{
     ButtonAction, DeckBeatJump, DeckBeatJumpInput, DeckCue, DeckCueInput, DeckHotCue,
-    DeckHotCueInput, DeckInput, DeckLoad, DeckLoadInput, DeckLoop, DeckLoopExit, DeckLoopIn,
-    DeckLoopInput, DeckLoopOut, DeckLoopResize, DeckLoopResizeInput, DeckMemoryCue,
-    DeckMemoryCueInput, DeckPause, DeckPitchBend, DeckPitchBendInput, DeckPlay, DeckReloop,
-    DeckSeek, DeckSeekInput, DeckSetBpm, DeckSetBpmInput, DeckSetMaster, DeckSetQuantize,
-    DeckSetQuantizeInput, DeckSetTempo, DeckSetTempoInput, DeckSetTempoRange,
-    DeckSetTempoRangeInput, DeckSync, DeckSyncInput, DeckTempoReset, GetPlayerStatus, LoopFactor,
-    MemoryCueAction, MemoryCueStep, MemoryCueTargetInput, MixerSet, MixerSetInput,
-    PlayerSetHotCueGate, PlayerSetHotCueGateInput, SyncType,
+    DeckHotCueDelete, DeckHotCueDeleteInput, DeckHotCueInput, DeckInput, DeckLoad, DeckLoadInput,
+    DeckLoop, DeckLoopExit, DeckLoopIn, DeckLoopInput, DeckLoopOut, DeckLoopResize,
+    DeckLoopResizeInput, DeckMemoryCue, DeckMemoryCueDelete, DeckMemoryCueDeleteInput,
+    DeckMemoryCueInput, DeckMemoryCueSet, DeckPause, DeckPitchBend, DeckPitchBendInput, DeckPlay,
+    DeckReloop, DeckScrub, DeckScrubInput, DeckSeek, DeckSeekInput, DeckSetBpm, DeckSetBpmInput,
+    DeckSetMaster, DeckSetQuantize, DeckSetQuantizeInput, DeckSetTempo, DeckSetTempoInput,
+    DeckSetTempoRange, DeckSetTempoRangeInput, DeckSync, DeckSyncInput, DeckTempoReset,
+    GetPlayerStatus, LoopFactor, MemoryCueAction, MemoryCueStep, MemoryCueTargetInput, MixerSet,
+    MixerSetInput, PlayerSetHotCueGate, PlayerSetHotCueGateInput, PlayerSetQuantizeValue,
+    PlayerSetQuantizeValueInput, PlayerSetSyncPhase, PlayerSetSyncPhaseInput, PreviewPlay,
+    PreviewPlayInput, PreviewStop, ScrubActionInput, SyncType,
 };
 pub use import_rekordbox::{ImportCounts, ImportRekordbox, ImportRekordboxInput, ImportReport};
 pub use library::{
@@ -52,7 +55,9 @@ pub enum Effect {
     Destructive,
     /// Writes to a USB drive or other device. Needs explicit confirmation.
     DeviceWrite,
-    /// Controls audio playback (decks, mixer); doesn't change the library.
+    /// Controls audio playback (decks, mixer, preview); doesn't change the
+    /// library. A player command that can also save to the library (a hot
+    /// cue stored from an empty pad, an A-GAIN trim) is `Edit` instead.
     Playback,
 }
 
@@ -61,6 +66,10 @@ pub trait Command {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
     const EFFECT: Effect;
+    /// Acts on the audio engine (decks, mixer, preview player), whatever
+    /// its effect class. The desktop app runs these on their own context so
+    /// library work (an import) never delays a deck.
+    const PLAYER: bool = false;
     type Input: DeserializeOwned + JsonSchema;
     type Output: Serialize + JsonSchema;
 
@@ -161,6 +170,8 @@ pub struct CommandInfo {
     pub name: &'static str,
     pub description: &'static str,
     pub effect: Effect,
+    /// Acts on the audio engine (see [`Command::PLAYER`]).
+    pub player: bool,
     pub input_schema: Value,
     pub output_schema: Value,
 }
@@ -170,6 +181,7 @@ fn info<C: Command>() -> CommandInfo {
         name: C::NAME,
         description: C::DESCRIPTION,
         effect: C::EFFECT,
+        player: C::PLAYER,
         input_schema: schema::<C::Input>(),
         output_schema: schema::<C::Output>(),
     }
@@ -230,8 +242,12 @@ registry![
     DeckPause,
     DeckCue,
     DeckHotCue,
+    DeckHotCueDelete,
     DeckMemoryCue,
+    DeckMemoryCueSet,
+    DeckMemoryCueDelete,
     DeckSeek,
+    DeckScrub,
     DeckBeatJump,
     DeckLoop,
     DeckLoopIn,
@@ -248,6 +264,10 @@ registry![
     DeckSetMaster,
     DeckSetQuantize,
     PlayerSetHotCueGate,
+    PlayerSetQuantizeValue,
+    PlayerSetSyncPhase,
     MixerSet,
+    PreviewPlay,
+    PreviewStop,
     GetPlayerStatus,
 ];

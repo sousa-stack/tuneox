@@ -38,6 +38,19 @@ describe("EXPORT key map", () => {
     expect(bindKey("KeyT", shift)).toEqual({ deck: 2, action: { kind: "timeMode" }, held: false });
   });
 
+  test("memory cue set/delete and hot cue clear", () => {
+    expect(bindKey("KeyM", plain)).toEqual({ deck: 1, action: { kind: "memoryCueSet" }, held: false });
+    expect(bindKey("KeyX", shift)).toEqual({ deck: 2, action: { kind: "memoryCueDelete" }, held: false });
+    const cmd: Modifiers = { ...plain, metaKey: true };
+    expect(bindKey("Digit1", cmd)).toEqual({ deck: 1, action: { kind: "hotCueDelete", slot: 0 }, held: false });
+    expect(bindKey("Digit3", { ...cmd, shiftKey: true })).toEqual({ deck: 2, action: { kind: "hotCueDelete", slot: 2 }, held: false });
+    expect(bindKey("Digit2", { ...plain, ctrlKey: true })?.action).toEqual({ kind: "hotCueDelete", slot: 1 });
+    // Only A–C, and not with ⌥ or both ⌘ and Ctrl.
+    expect(bindKey("Digit4", cmd)).toBeNull();
+    expect(bindKey("Digit1", { ...cmd, altKey: true })).toBeNull();
+    expect(bindKey("Digit1", { ...cmd, ctrlKey: true })).toBeNull();
+  });
+
   test("leaves ⌘/Ctrl/⌥ combinations to the app (⌘F searches)", () => {
     expect(bindKey("KeyF", { ...plain, metaKey: true })).toBeNull();
     expect(bindKey("Space", { ...plain, ctrlKey: true })).toBeNull();

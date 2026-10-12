@@ -14,6 +14,12 @@ export const DEFAULT_ZOOM = 3;
 
 export type TimeMode = "remaining" | "elapsed";
 
+/** Quantize resolutions in beats (rekordbox EXPORT's "Quantize Beat Value"). */
+export const QUANTIZE_VALUES = [0.125, 0.25, 0.5, 1] as const;
+export type QuantizeValue = (typeof QUANTIZE_VALUES)[number];
+/** What beat sync aligns: the beat (rekordbox) or the bar (a TuneOx extra). */
+export type SyncPhase = "beat" | "bar";
+
 export interface Settings {
   style: WaveformStyle;
   zoom: number;
@@ -25,10 +31,23 @@ export interface Settings {
   mixerOpen: boolean;
   decksVisible: boolean;
   hud: boolean;
+  quantizeBeats: QuantizeValue;
+  syncPhase: SyncPhase;
 }
 
 const STORAGE_KEY = "tuneox.decks.v1";
-const PERSISTED: (keyof Settings)[] = ["style", "zoom", "jump", "loopBeats", "timeMode", "cueTab", "mixerOpen", "decksVisible"];
+const PERSISTED: (keyof Settings)[] = [
+  "style",
+  "zoom",
+  "jump",
+  "loopBeats",
+  "timeMode",
+  "cueTab",
+  "mixerOpen",
+  "decksVisible",
+  "quantizeBeats",
+  "syncPhase",
+];
 
 const defaults: Settings = {
   // rekordbox's default (kWaveColorTypeDefaultValue = 3Band).
@@ -42,6 +61,8 @@ const defaults: Settings = {
   mixerOpen: false,
   decksVisible: true,
   hud: false,
+  quantizeBeats: 1,
+  syncPhase: "beat",
 };
 
 function valid(s: Settings): Settings {
@@ -59,6 +80,8 @@ function valid(s: Settings): Settings {
     cueTab: pair(s.cueTab, (v) => v === "hot" || v === "memory", defaults.cueTab),
     mixerOpen: s.mixerOpen === true,
     decksVisible: s.decksVisible !== false,
+    quantizeBeats: QUANTIZE_VALUES.includes(s.quantizeBeats) ? s.quantizeBeats : 1,
+    syncPhase: s.syncPhase === "bar" ? "bar" : "beat",
   };
 }
 

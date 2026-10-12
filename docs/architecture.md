@@ -51,7 +51,7 @@ These are the reasons TuneOx should feel faster than rekordbox. Treat them as re
 
 | Thread | Does | Talks through |
 | --- | --- | --- |
-| Audio callback (cpal) | Applies queued commands, renders both decks (cubic resampling, tempo, loops), sync, mixer. No allocation, locks, logging or I/O. | Pops commands from an `rtrb` SPSC queue; writes a state snapshot to a `triple_buffer` once per block; pushes replaced tracks onto a "garbage" queue so they're freed elsewhere. |
+| Audio callback (cpal) | Applies queued commands, renders both decks (cubic resampling, tempo, loops, scrubbing) and the browser's preview voice, sync, mixer. No allocation, locks, logging or I/O. | Pops commands from an `rtrb` SPSC queue; writes a state snapshot to a `triple_buffer` once per block (plain numbers only: cue colours and comments are joined in when the non-real-time side builds `DeckState`); pushes replaced tracks onto a "garbage" queue so they're freed elsewhere. |
 | Output (`tuneox-audio-out`) | Opens the default device and owns the cpal stream (so the engine handle is `Send + Sync`), reopens it if the device disappears, or drives the core silently on a timer when there's no device. | |
 | Events (`tuneox-audio-events`) | Every 5 ms: turns the latest snapshot into `DeckState`/`MixerState` events (on change, ~20 Hz while playing), frees garbage. | Engine event handler (the desktop app re-emits as `tuneox://deck` / `tuneox://mixer`). |
 | Decoder (`tuneox-decode`, one per load) | symphonia decode into 16-bit stereo chunks (4 bytes/frame, ~10.6 MB per minute at 44.1 kHz) that the audio thread reads while decoding continues. | Atomics: chunks are published through `OnceLock`, the decoded frame count with release/acquire. |
@@ -60,6 +60,8 @@ These are the reasons TuneOx should feel faster than rekordbox. Treat them as re
 The audio callback reaches the DSP core through a `Mutex` it only ever `try_lock`s: in real-time mode nothing else takes that lock while a stream runs, so it's one atomic swap, and if it were ever contended the callback would output silence rather than wait. The offline engine (`Engine::offline`) runs the same core on the caller's thread, with time advanced by `render`, which is how the tests drive it.
 
 Positions in the clock (`position_us` at `at_ms`) are what's heard: the callback adds the device's reported output latency to the time a block is rendered.
+
+Commands that act on the engine (decks, mixer, preview player, player settings) set `Command::PLAYER`. The desktop app runs those on a second `Context` with its own library connection, so an import never delays a deck; it routes by that flag rather than by effect class, because some of them also save to the library (a hot cue stored from a pad, an A-GAIN trim) and are therefore effect `edit`.
 
 ## Device export
 

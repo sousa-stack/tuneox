@@ -18,6 +18,12 @@ function press({ deck, action }: KeyBinding) {
       return act.beatJump(deck, action.direction);
     case "hotCue":
       return act.hotCuePress(deck, action.slot);
+    case "hotCueDelete":
+      return act.hotCueDelete(deck, action.slot);
+    case "memoryCueSet":
+      return act.memoryCueSet(deck);
+    case "memoryCueDelete":
+      return act.memoryCueDeleteHere(deck);
     case "loopIn":
       return act.loopIn(deck);
     case "loopOut":

@@ -129,7 +129,12 @@ function FunctionRow({ deck, state }: { deck: DeckId; state: DeckState }) {
   const percent = state.tempo_percent;
   return (
     <div className="deck-func">
-      <DeckButton className="txt" disabled title="Saving memory cues comes with cue editing">
+      <DeckButton
+        className="txt"
+        disabled={!loaded || (state.cue_us == null && !state.loop && !state.last_loop)}
+        title={`Save the cue point, or the loop, as a memory cue (${deck === 2 ? "⇧" : ""}M)`}
+        onClick={() => act.memoryCueSet(deck)}
+      >
         MEMORY
       </DeckButton>
       <div className="group">
@@ -198,7 +203,12 @@ function FunctionRow({ deck, state }: { deck: DeckId; state: DeckState }) {
       <DeckButton className="txt" disabled={!loaded} title="Tempo reset (F3)" onClick={() => act.tempoReset(deck)}>
         RST
       </DeckButton>
-      <DeckButton className="txt q" active={state.quantize} title="Quantize (Q)" onClick={() => act.toggleQuantize(deck)}>
+      <DeckButton
+        className="txt q"
+        active={state.quantize}
+        title={`Quantize (Q): snaps to ${settings.quantizeBeats === 1 ? "the beat" : `1/${1 / settings.quantizeBeats} beat`}`}
+        onClick={() => act.toggleQuantize(deck)}
+      >
         Q
       </DeckButton>
     </div>

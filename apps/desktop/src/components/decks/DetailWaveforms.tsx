@@ -1,6 +1,7 @@
 // The two enlarged waveforms, stacked and facing each other, with zoom
 // controls on the left edge. Click a lane to move that deck's playhead there;
-// drag to scrub (deck_seek, play state kept).
+// drag to move it like a record (deck_scrub: the audio follows the drag, and
+// a playing deck plays on when let go).
 
 import { useEffect, useRef } from "react";
 import * as act from "../../decks/actions";
@@ -13,7 +14,10 @@ import { DeckButton } from "./controls";
 interface Drag {
   deck: DeckId;
   startX: number;
-  lastX: number;
+  /** Once scrubbing: where the drag took hold, and the deck's position then. */
+  originX: number;
+  originUs: number;
+  targetUs: number;
   moved: boolean;
 }
 
@@ -60,27 +64,45 @@ export function DetailWaveforms() {
           const deck = deckAt(e);
           if (act.deckState(deck).track_id == null) return;
           e.currentTarget.setPointerCapture(e.pointerId);
-          drag.current = { deck, startX: e.clientX, lastX: e.clientX, moved: false };
+          drag.current = { deck, startX: e.clientX, originX: 0, originUs: 0, targetUs: 0, moved: false };
         }}
         onPointerMove={(e) => {
           const d = drag.current;
           if (!d) return;
-          if (!d.moved && Math.abs(e.clientX - d.startX) < CLICK_SLOP_PX) return;
-          d.moved = true;
-          const dx = e.clientX - d.lastX;
-          d.lastX = e.clientX;
-          if (dx !== 0) act.seekTo(d.deck, act.currentPosition(d.deck) - dx * usPerPixel(d.deck));
+          if (!d.moved) {
+            if (Math.abs(e.clientX - d.startX) < CLICK_SLOP_PX) return;
+            // The hand goes on the record here.
+            d.moved = true;
+            d.originX = e.clientX;
+            d.originUs = act.scrubStart(d.deck);
+            d.targetUs = d.originUs;
+            return;
+          }
+          // Dragging right pulls the track back, as the waveform moves right.
+          const target = d.originUs - (e.clientX - d.originX) * usPerPixel(d.deck);
+          if (target !== d.targetUs) {
+            d.targetUs = target;
+            act.scrubMove(d.deck, target);
+          }
         }}
         onPointerUp={(e) => {
           const d = drag.current;
           drag.current = null;
-          if (!d || d.moved) return;
+          if (!d) return;
+          if (d.moved) {
+            act.scrubEnd(d.deck, d.targetUs);
+            return;
+          }
           // A click moves the playhead to the clicked spot.
           const rect = e.currentTarget.getBoundingClientRect();
           const offset = e.clientX - (rect.left + rect.width / 2);
           act.seekTo(d.deck, act.currentPosition(d.deck) + offset * usPerPixel(d.deck));
         }}
-        onPointerCancel={() => (drag.current = null)}
+        onPointerCancel={() => {
+          const d = drag.current;
+          drag.current = null;
+          if (d?.moved) act.scrubEnd(d.deck, d.targetUs);
+        }}
       />
     </div>
   );

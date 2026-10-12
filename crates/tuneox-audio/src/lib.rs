@@ -1,12 +1,12 @@
 //! The TuneOx audio engine: two decks and a mixer, like rekordbox's DUAL
-//! PLAYER.
+//! PLAYER, plus the browser's preview player.
 //!
 //! # Threads
 //!
 //! - **Audio thread** (cpal's callback, on the output thread's stream): runs
 //!   the [`core`] DSP: applies queued commands, renders both decks with
-//!   cubic resampling, applies sync and the mixer. It never allocates,
-//!   locks, logs or does I/O.
+//!   cubic resampling (and scrubbing) and the preview voice, applies sync and
+//!   the mixer. It never allocates, locks, logs or does I/O.
 //! - **Output thread** (`tuneox-audio-out`): opens the default device and
 //!   owns the stream, reopening it if the device goes away, or drives the
 //!   core silently on a timer when there's no device.
@@ -31,21 +31,25 @@ mod grid;
 mod mixer;
 mod output;
 mod pcm;
+mod preview;
 mod state;
 
 #[cfg(test)]
 mod tests;
 
-pub use deck::{MAX_BPM, MAX_LOOP_BEATS, MIN_BPM, MIN_LOOP_BEATS, PITCH_BEND};
+pub use deck::{
+    MAX_BPM, MAX_LOOP_BEATS, MAX_SAVED_MEMORY_CUES, MIN_BPM, MIN_LOOP_BEATS, PITCH_BEND,
+};
 pub use decode::mp3_lead_in_frames;
 pub use engine::{
-    Engine, LoadRequest, MemoryCueTarget, MixerSettingsUpdate, OFFLINE_SAMPLE_RATE, Source,
-    TEMPO_RANGES,
+    Engine, LoadRequest, MemoryCueTarget, MixerSettingsUpdate, OFFLINE_SAMPLE_RATE, PreviewRequest,
+    QUANTIZE_BEAT_VALUES, ScrubAction, Source, TEMPO_RANGES,
 };
 pub use mixer::{AUTO_GAIN_MAX_DB, AUTO_GAIN_MIN_DB, EQ_KILL_DB, EQ_MAX_DB};
 pub use state::{
     BendDirection, ChannelState, DeckEvent, DeckState, EngineEvent, HotCueState, LoopState,
-    MemoryCueState, MixerState, OutputInfo, PlayerStatus, SyncMode,
+    MemoryCueState, MixerState, OutputInfo, PlayerStatus, PreviewEvent, PreviewState, SyncMode,
+    SyncPhase,
 };
 
 #[derive(Debug, thiserror::Error)]
