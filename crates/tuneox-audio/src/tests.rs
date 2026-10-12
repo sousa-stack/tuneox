@@ -603,6 +603,18 @@ fn hot_cues_jump_set_and_preview() {
     let lp = state.active_loop.unwrap();
     assert_eq!((lp.start_us, lp.end_us), (8_000_000, 10_000_000));
     engine.hot_cue(1, 1, false).unwrap();
+    // Just before a beat, the phase-kept landing point would be before the
+    // loop: it lands at the same phase inside the loop instead.
+    engine.seek(1, 4_400_000).unwrap();
+    let state = engine.hot_cue(1, 1, true).unwrap();
+    assert!(state.active_loop.is_some());
+    assert_near(
+        state.position_us,
+        9_900_000,
+        0.5,
+        "phase-kept, inside the loop",
+    );
+    engine.hot_cue(1, 1, false).unwrap();
     engine.loop_exit(1).unwrap();
 
     // Paused: plays while held, returns on release.
@@ -921,6 +933,79 @@ fn sync_with_no_master_makes_the_deck_master() {
     assert!(
         (s2.bpm.unwrap() - 120.0).abs() < 1e-9,
         "follows the paused master"
+    );
+}
+
+#[test]
+fn sync_holds_on_millisecond_rounded_grids() {
+    // rekordbox stores beat times in whole milliseconds, so a 126 BPM grid
+    // alternates 476 and 477 ms beats.
+    let ms_grid = |bpm: f64, first: f64, beats: usize| BeatGrid {
+        beats: (0..beats)
+            .map(|i| Beat {
+                time_us: ((first + i as f64 * 60.0 / bpm) * 1000.0).round() as i64 * 1000,
+                bar_position: (i % 4) as u8 + 1,
+                bpm_centi: (bpm * 100.0).round() as u16,
+            })
+            .collect(),
+    };
+    let engine = Engine::offline(RATE);
+    for (deck, bpm, first) in [(1, 128.0, 0.0), (2, 126.0, 0.2)] {
+        engine
+            .load(
+                deck,
+                samples(
+                    RATE,
+                    click_track(RATE, bpm, first, 40.0),
+                    Some(ms_grid(bpm, first, 80)),
+                    vec![],
+                ),
+            )
+            .unwrap();
+    }
+    engine.play(1).unwrap();
+    engine.sync(2, true).unwrap();
+    engine.play(2).unwrap();
+    let mut worst: f64 = 0.0;
+    for _ in 0..30 {
+        render(&engine, 1.0);
+        worst = worst.max(phase_error_ms(&engine, (0.0, 128.0), (0.2, 126.0)));
+    }
+    assert!(worst < 1.0, "worst phase error {worst} ms");
+}
+
+#[test]
+fn sync_and_loops() {
+    let engine = Engine::offline(RATE);
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+    click_deck(&engine, 2, 126.0, 0.1, vec![]);
+    engine.play(1).unwrap();
+    engine.sync(2, true).unwrap();
+    engine.play(2).unwrap();
+    render(&engine, 1.0);
+
+    // A whole-beat loop on the synced deck stays locked across wraps.
+    engine.beat_loop(2, 4.0).unwrap();
+    render(&engine, 6.0);
+    assert!(
+        engine.deck(2).unwrap().active_loop.is_some(),
+        "still looping"
+    );
+    let err = phase_error_ms(&engine, (0.0, 120.0), (0.1, 126.0));
+    assert!(err < 1.0, "phase error in a loop {err} ms");
+    engine.loop_exit(2).unwrap();
+
+    // A ½-beat loop on the master restarts its phase every wrap; the synced
+    // deck keeps the tempo and doesn't chase it.
+    engine.beat_loop(1, 0.5).unwrap();
+    render(&engine, 0.1);
+    let before = engine.deck(2).unwrap();
+    render(&engine, 1.0);
+    let after = engine.deck(2).unwrap();
+    let travelled = (after.position_us - before.position_us) as f64;
+    assert!(
+        (travelled - 1e6 * before.rate).abs() < 1.0,
+        "no jumps: {travelled} µs"
     );
 }
 
@@ -1285,9 +1370,17 @@ fn render_path_does_not_allocate() {
 #[test]
 #[ignore = "opens the real audio device (silently)"]
 fn opens_the_default_device_silently() {
+    let started = std::time::Instant::now();
     let engine = Engine::start().unwrap();
+    let returned = started.elapsed();
+    // The first command waits for the device to open.
+    engine.set_quantize(true).unwrap();
     let output = engine.output().unwrap();
-    eprintln!("output: {output:?}");
+    eprintln!(
+        "start returned in {:.2} ms, device ready after {:.1} ms: {output:?}",
+        returned.as_secs_f64() * 1000.0,
+        started.elapsed().as_secs_f64() * 1000.0
+    );
     let before = engine.deck(1).unwrap().at_ms;
     std::thread::sleep(Duration::from_millis(200));
     let after = engine.deck(1).unwrap().at_ms;

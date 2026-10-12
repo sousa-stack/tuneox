@@ -261,7 +261,7 @@ impl Deck {
     /// landing as far before/after the hot cue as the read head was from its
     /// nearest beat, so a synced or beatmatched deck stays in time.
     fn hot_cue_press_while_playing(&mut self, hot_cue: HotCue, quantize: bool) {
-        let target = match (&self.grid, quantize) {
+        let mut target = match (&self.grid, quantize) {
             (Some(grid), true) => {
                 let offset = crate::grid::wrap_phase(grid.beat_at(self.pos));
                 grid.shift(hot_cue.start, offset)
@@ -269,6 +269,13 @@ impl Deck {
             _ => hot_cue.start,
         };
         self.activate_hot_loop(hot_cue);
+        if let Some(lp) = self.active_loop.filter(|_| hot_cue.end.is_some())
+            && !(lp.start..lp.end).contains(&target)
+        {
+            // Landing just before a hot loop would leave it at once: take
+            // the same phase inside it instead.
+            target = lp.start + (target - lp.start).rem_euclid(lp.len());
+        }
         self.jump_to(target);
     }
 

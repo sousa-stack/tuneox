@@ -23,6 +23,12 @@ _Last updated: 2026-10-12_
 - Command registry: `library_summary`, `list_playlists`, `get_playlist`, `search_tracks`, `list_tracks`, `get_track`, `import_rekordbox`.
 - `tuneox` CLI over the registry; `tuneox mcp` serves them as MCP tools (protocol 2026-07-28 and legacy `initialize` clients), with progress notifications.
 
+**Audio engine** (`tuneox-audio`; spec part C: [specs/decks.md](specs/decks.md))
+- Two decks and a mixer for testing transitions (rekordbox's DUAL PLAYER): symphonia decoding of MP3, M4A (AAC-LC/ALAC), FLAC, WAV and AIFF into 16-bit stereo in memory (~10.6 MB per minute), playable while it decodes; all 113 files in the maintainers' test folder decode, at 1,000–4,000× real time.
+- CDJ-style CUE, hot cues, seek, beat jump, auto beat loops (sample-accurate wraps), tempo ±6/10/16/100 % with cubic resampling (vinyl mode), beat sync with master handling and phase lock, quantize, isolator EQ with kill, channel faders, crossfader, master volume.
+- cpal output on its own thread (follows the default device; runs silently on a timer without one), real-time-safe core (a counting allocator test proves the render path doesn't allocate), offline engine for tests.
+- Commands: `deck_load`, `deck_play`, `deck_pause`, `deck_cue`, `deck_hot_cue`, `deck_seek`, `deck_beat_jump`, `deck_loop`, `deck_loop_exit`, `deck_set_tempo`, `deck_set_tempo_range`, `deck_sync`, `deck_set_master`, `player_set_quantize`, `mixer_set`, `player_status` (new effect class `playback`). The desktop app starts the engine at launch and forwards `tuneox://deck` / `tuneox://mixer` events.
+
 **Desktop app**
 - Library view: Collection and playlist tree, virtualized track table (10k+ tracks), instant local search and sorting, Camelot keys, responsive columns, detail panel with cues and beat grid summary, first-run import with live progress.
 
@@ -33,10 +39,9 @@ _Last updated: 2026-10-12_
 ## In progress
 
 **Decks: waveforms, preview player and dual player** (spec: [specs/decks.md](specs/decks.md))
-- rekordbox research: dual player behavior, waveform styles and colors, sync/cue/quantize rules.
+- rekordbox research: dual player behavior, waveform styles and colors, sync/cue/quantize rules. Its findings settle the engine's "Behavior to confirm" list in the spec.
 - Waveform data: decode ANLZ waveform sections into TuneOx's waveform format; `get_waveform` command.
-- Audio engine (`tuneox-audio`): two decks, decoding, tempo, sync, crossfader; `deck_*` commands.
-- Then: deck UI in the desktop app (overview + scrolling detail waveforms, transport, tempo, sync, mixer).
+- Then: deck UI in the desktop app (overview + scrolling detail waveforms, transport, tempo, sync, mixer) on the engine's commands and events.
 
 ## Next
 
@@ -51,6 +56,10 @@ _Last updated: 2026-10-12_
 - Smart playlists are imported with their rules but not evaluated.
 - Beat grids are stored per beat (~12 bytes/beat); a 10k-track library is ~106 MB. Can be packed much smaller without losing precision.
 - The desktop app and MCP server both open the library file directly; the planned "one process owns the library" socket isn't built yet.
+- Decks: no key lock / master tempo yet (pitch follows tempo; time-stretching is next, see the spec's "Later"), no headphone cue output, no slip mode, reverse, jog/nudge/pitch bend, memory cue CALL or reloop commands. Hot cues set from the pads live only in the engine until cue editing exists. No auto-cue to the first sound on load.
+- Decks: transport details follow CDJ conventions until rekordbox research confirms them (the spec's "Behavior to confirm"), including whether MP3 encoder delay should be trimmed.
+- Decks: the output is always the default device (no device picker); AAC is LC only (symphonia has no HE-AAC); 24-bit sources are stored at 16 bits.
+- The desktop's `tuneox://deck` forwarding is built but hasn't been exercised in a running GUI yet.
 
 ## Decision log
 
@@ -62,6 +71,8 @@ _Last updated: 2026-10-12_
 - **2026-10-12** Every rekordbox paid feature is free in TuneOx ([feature-parity.md](feature-parity.md)).
 - **2026-10-12** Imported tracks keep pointing at rekordbox's ANLZ files for waveform data instead of copying 3.9 GB of analysis.
 - **2026-10-12** Big features are built by parallel agents in worktrees against a written spec in `docs/specs/`, orchestrated and merged by one session.
+- **2026-10-12** Audio engine crates: symphonia (decoding, incl. AIFF), cpal (output), rtrb (command queue), triple_buffer (state out). Tracks are decoded fully into memory as 16-bit stereo (4 bytes/frame) rather than streamed: seeks, hot cues and loops never touch the disk, at ~11 MB per minute per deck.
+- **2026-10-12** Playback commands are effect class `playback`. In the desktop app they run on their own `Context` (second library connection, shared engine) so library work never delays a deck.
 
 ## Test setup the maintainers use
 

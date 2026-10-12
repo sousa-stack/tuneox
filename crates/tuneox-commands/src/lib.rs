@@ -6,6 +6,7 @@
 //! written for both people and LLMs, and an [`Effect`] class that front ends
 //! use to decide what needs confirmation.
 
+mod decks;
 mod import_rekordbox;
 mod library;
 
@@ -15,8 +16,16 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tuneox_audio::Engine;
 use tuneox_library::Library;
 
+pub use decks::{
+    ButtonAction, DeckBeatJump, DeckBeatJumpInput, DeckCue, DeckCueInput, DeckHotCue,
+    DeckHotCueInput, DeckInput, DeckLoad, DeckLoadInput, DeckLoop, DeckLoopExit, DeckLoopInput,
+    DeckPause, DeckPlay, DeckSeek, DeckSeekInput, DeckSetMaster, DeckSetTempo, DeckSetTempoInput,
+    DeckSetTempoRange, DeckSetTempoRangeInput, DeckSync, DeckSyncInput, GetPlayerStatus, MixerSet,
+    MixerSetInput, PlayerSetQuantize, PlayerSetQuantizeInput,
+};
 pub use import_rekordbox::{ImportCounts, ImportRekordbox, ImportRekordboxInput, ImportReport};
 pub use library::{
     GetPlaylist, GetPlaylistInput, GetPlaylistOutput, GetTrack, GetTrackInput, GetTrackOutput,
@@ -37,6 +46,8 @@ pub enum Effect {
     Destructive,
     /// Writes to a USB drive or other device. Needs explicit confirmation.
     DeviceWrite,
+    /// Controls audio playback (decks, mixer); doesn't change the library.
+    Playback,
 }
 
 pub trait Command {
@@ -64,6 +75,8 @@ pub struct Context {
     /// Where the library lives on disk, if it isn't in memory.
     pub library_path: Option<PathBuf>,
     progress: Box<dyn FnMut(&Progress) + Send>,
+    /// The audio engine, once a deck command has started it.
+    engine: Option<Engine>,
 }
 
 impl Context {
@@ -72,7 +85,31 @@ impl Context {
             library,
             library_path,
             progress: Box::new(|_| {}),
+            engine: None,
         }
+    }
+
+    /// Uses `engine` for deck commands instead of opening the default audio
+    /// output on first use: an offline engine in tests, or one shared with
+    /// another context.
+    pub fn with_engine(mut self, engine: Engine) -> Self {
+        self.engine = Some(engine);
+        self
+    }
+
+    /// The audio engine, started on the default output device the first
+    /// time it's needed, so the CLI and MCP server only open a device when
+    /// asked to play.
+    pub fn engine(&mut self) -> Result<&Engine> {
+        if self.engine.is_none() {
+            self.engine = Some(Engine::start()?);
+        }
+        Ok(self.engine.as_ref().expect("just started"))
+    }
+
+    /// The audio engine if it's running.
+    pub fn running_engine(&self) -> Option<&Engine> {
+        self.engine.as_ref()
     }
 
     pub fn on_progress(mut self, report: impl FnMut(&Progress) + Send + 'static) -> Self {
@@ -103,6 +140,8 @@ pub enum Error {
     Library(#[from] tuneox_library::Error),
     #[error(transparent)]
     MasterDb(#[from] tuneox_pioneer::masterdb::Error),
+    #[error(transparent)]
+    Audio(#[from] tuneox_audio::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -178,4 +217,20 @@ registry![
     ListTracks,
     GetTrack,
     ImportRekordbox,
+    DeckLoad,
+    DeckPlay,
+    DeckPause,
+    DeckCue,
+    DeckHotCue,
+    DeckSeek,
+    DeckBeatJump,
+    DeckLoop,
+    DeckLoopExit,
+    DeckSetTempo,
+    DeckSetTempoRange,
+    DeckSync,
+    DeckSetMaster,
+    PlayerSetQuantize,
+    MixerSet,
+    GetPlayerStatus,
 ];

@@ -66,6 +66,8 @@ Reads the track's ANLZ files from `analysis_dir` on demand (nothing new stored i
 
 ## C. Audio engine and deck commands
 
+Status: **built** (engine agent, 2026-10-12). The engine, every command below and desktop event forwarding are in; behavior that research part A may change is listed under "Behavior to confirm".
+
 ### Engine (`crates/tuneox-audio`)
 
 - **Two decks** and a **mixer**: per-deck volume (channel fader) and 3-band EQ (low/mid/high, −∞ to +6 dB, kill at minimum), crossfader, master volume. One stereo output (the default device).
@@ -77,6 +79,16 @@ Reads the track's ANLZ files from `analysis_dir` on demand (nothing new stored i
 - **Real-time rules:** the audio callback never allocates, locks, logs or does I/O. Control goes in through a lock-free queue; state comes out through lock-free snapshots. The cpal stream lives on a dedicated thread, so the engine handle is `Send + Sync`.
 - **Testable offline:** the DSP core renders into a buffer without an audio device (`render(&mut self, out: &mut [f32])`), so tests can load synthetic audio (generated in the test: clicks on a known beat grid, tones), drive transport and assert on samples, positions, tempo and phase alignment.
 
+#### As built
+
+- **Crates:** `symphonia` 0.6 (MPL-2.0; features `mp3 aac isomp4 alac flac pcm wav aiff all-meta`; AIFF is native in 0.6, so no custom reader), `cpal` 0.18 (Apache-2.0; follows the macOS default output when it changes), `rtrb` 0.4 (MIT/Apache-2.0; wait-free SPSC queue), `triple_buffer` 9 (MPL-2.0; latest-value state hand-off). All GPL-3.0-compatible.
+- **PCM in memory:** 16-bit stereo, one frame packed in an `AtomicU32` (4 bytes/frame): **10.6 MB per minute at 44.1 kHz, 11.5 MB at 48 kHz**. Stored in 32 768-frame chunks the decoder publishes through `OnceLock`, plus a release/acquire frame counter, so the audio thread plays a track while it decodes (no locks, no `unsafe`). Decoding runs at 1,000–4,000× real time (a 5-minute AIFF in ~60 ms, an MP3 in ~250 ms on an M-series Mac); all 113 files in the maintainer's test folder (MP3, AIFF, WAV, M4A) decode. Loading the track that's on the other deck reuses its audio (instant double).
+- **Read head:** position in seconds (`f64`), advanced `rate / device_rate` per output sample, read with 4-point Catmull-Rom interpolation. Loop wraps keep the fractional overshoot, so loops are exact to the sample at any rate. Jumps, starts and stops fade over 128 samples (~3 ms); loop wraps don't.
+- **Threads:** audio callback (DSP core), `tuneox-audio-out` (owns the cpal stream; reopens it if the device disappears; with no device it drives the core silently on a timer so decks keep moving), `tuneox-audio-events` (every 5 ms: events, freeing replaced tracks), `tuneox-decode` (one per load). See "Audio engine threads" in [architecture.md](../architecture.md).
+- **Commands are synchronous but short:** an `Engine` call queues the command and returns once the audio thread has applied it, with the resulting state: at most one device buffer (256 frames requested, ~6 ms; measured 1–4 ms on MacBook Pro speakers). The UI should still update optimistically and not wait for the reply on interactive paths. `Engine::start()` returns immediately; the device opens in the background (~150 ms) and the first command waits for it.
+- **Offline engine:** `Engine::offline(sample_rate)` runs the same core on the caller's thread; `render(&mut [f32])` (interleaved stereo) advances its clock; `poll_events()` returns the events the real engine would send.
+- **Desktop:** deck/mixer commands (effect `playback`) run on a second `Context` with its own library connection and the same engine, so a long import never holds up a deck. The engine starts at launch; the UI should call `player_status` on mount for the initial state, then follow events.
+
 ### Clock and events
 
 The UI animates the playhead itself; the engine only says where a deck was and how fast it's moving:
@@ -84,23 +96,45 @@ The UI animates the playhead itself; the engine only says where a deck was and h
 ```jsonc
 // DeckState: returned by every deck command and sent as an event
 { "deck": 1, "track_id": 123, "loading": false, "error": null,
-  "playing": true,
-  "position_us": 61234000,       // where the deck was at `at_ms`
-  "at_ms": 912345.25,            // engine clock (monotonic ms) when sampled
-  "rate": 1.04,                  // track microseconds per real microsecond (0 when paused)
-  "duration_us": 306000000,
+  "playing": true,               // PLAY on, or CUE/hot cue held from pause
+  "position_us": 61234000,       // where the deck was (as heard) at `at_ms`
+  "at_ms": 912345.25,            // engine clock (monotonic ms)
+  "rate": 1.04,                  // track µs per real µs; 0 when paused or waiting for the decoder
+  "duration_us": 306000000,      // an estimate while `loading`
   "tempo_percent": 4.0, "tempo_range": 10.0,
-  "bpm": 131.04, "original_bpm": 126.0,
+  "bpm": 131.04, "original_bpm": 126.0,   // null without a grid or BPM
   "sync": true, "master": false,
   "cue_us": 24000,
-  "loop": { "start_us": 60000000, "end_us": 61904000 }   // or null
+  "loop": { "start_us": 60000000, "end_us": 61904000 },   // active loop, or null
+  "hot_cues": [                  // set pads only, in slot order (incl. pads set since loading)
+    { "slot": 0, "start_us": 24000, "end_us": null },
+    { "slot": 2, "start_us": 92000000, "end_us": 93904000 } ]
 }
 ```
 
 - Events carry `sent_at_ms` (engine clock at send time). The UI estimates `offset = performance.now() − sent_at_ms` and keeps the **minimum** offset seen (the least-delayed delivery), then shows `position_us + (performance.now() − offset − at_ms) × 1000 × rate`.
-- The engine emits a `DeckState` event on every change and about 20 times a second while a deck plays, so drift stays small.
-- Reported positions account for output latency where the device reports it (what you hear, not what was rendered).
+- The engine emits a `DeckState` event on every change and about 20 times a second while a deck plays, so drift stays small. Every loop wrap is a change, so it's sent too; between events the UI should wrap its extrapolated position inside an active `loop` itself.
+- Reported positions account for output latency where the device reports it (what you hear, not what was rendered): `at_ms` is when the block's first sample reaches the speakers, so it can be a few ms ahead of `sent_at_ms`.
 - Desktop: `apps/desktop/src-tauri` forwards engine events to the window as `tuneox://deck` (payload: `DeckState` + `sent_at_ms`) and `tuneox://mixer` (`MixerState`).
+
+```jsonc
+// MixerState
+{ "channels": [
+    { "deck": 1, "volume": 1.0, "eq_low": 0.0, "eq_mid": 0.0, "eq_high": 0.0 },
+    { "deck": 2, "volume": 1.0, "eq_low": 0.0, "eq_mid": 0.0, "eq_high": 0.0 } ],
+  "crossfader": 0.0,             // −1 = deck 1 only … 1 = deck 2 only
+  "master_volume": 1.0 }
+// volume and master_volume: linear gain 0–1. EQ in dB, −80 (= kill, −∞) to +6.
+
+// PlayerStatus
+{ "running": true,               // false until a deck command starts the engine
+  "decks": [ /* DeckState 1 */, /* DeckState 2 */ ],
+  "mixer": { /* MixerState */ },
+  "quantize": true,
+  "output": { "device": "MacBook Pro Speakers", "sample_rate": 44100, "channels": 2,
+              "latency_ms": 8.96, "error": null } }   // null before the device opens and offline;
+                                                      // device null + error when no device could be opened
+```
 
 ### Commands (`crates/tuneox-commands/src/decks.rs`)
 
@@ -122,11 +156,42 @@ New effect class **`playback`**: controls audio, doesn't change the library. MCP
 | `deck_set_master` | `deck` | `DeckState` |
 | `player_set_quantize` | `on` | `PlayerStatus` |
 | `mixer_set` | any of `deck`+`volume` (0–1), `deck`+`eq_low`/`eq_mid`/`eq_high` (dB), `crossfader` (−1 = deck 1 … 1 = deck 2), `master_volume` (0–1) | `MixerState` |
-| `player_status` | — | `PlayerStatus`: both `DeckState`s, `MixerState`, `quantize` |
+| `player_status` | — | `PlayerStatus`: both `DeckState`s, `MixerState`, `quantize`, `output` |
 
 `deck_load` looks up the track's file, beat grid and cues in the library and hands them to the engine; hot cues and memory cues come from the library. The engine starts lazily on the first deck command (the CLI/MCP server don't open an audio device unless asked); the desktop app starts it at launch so it can subscribe to events. Tests use an offline engine.
 
+As built: `player_status` has effect `read` and never starts the engine (`running: false` before). `deck_load` returns `NotFound` for an unknown track or a missing file; decode problems arrive later as `error` in the state. Beat-based commands (`deck_beat_jump`, `deck_loop`, `deck_sync` on) need a beat grid or at least a library BPM (then a steady grid from 0 s is assumed); without one they fail with a clear error. Mixer values are clamped to their ranges; `volume`/EQ without `deck` is an error.
+
 **Done when:** offline engine tests cover load, play/pause, CUE semantics, hot cues, seek, beat jump, loops (sample-accurate wrap), tempo (rate), sync (tempo and phase within 1 ms on synthetic grids), quantize, crossfader and EQ gains; deck commands are tested through `run_json` with an offline engine; the desktop app receives `tuneox://deck` events; `cargo clippy -D warnings` is clean.
+
+All covered (`crates/tuneox-audio/src/tests.rs`, `crates/tuneox-commands/src/decks.rs`), plus decoding synthetic WAV/AIFF files, sync on millisecond-rounded (rekordbox-style) grids, half/double-time sync, events at ~20 Hz, and a counting allocator proving the render path (commands, sync, loops, EQ, a track load) doesn't allocate or free. The desktop forwarding is built but only checked by compiling: the GUI wasn't run.
+
+### Behavior to confirm (research part A)
+
+Each item is one small function or constant in `crates/tuneox-audio`, so a correction is local.
+
+| # | What we do now (CDJ convention or best guess) | Where |
+| --- | --- | --- |
+| 1 | **CUE while playing:** back cue: jump to the cue point and pause. | `Deck::cue_press_while_playing` |
+| 2 | **CUE while paused away from the cue point:** set the cue point here (snapped to the nearest beat with quantize) and move to it; no preview on that press. | `Deck::cue_press_while_paused` |
+| 3 | **CUE while paused at the cue point:** play while held; release returns to the cue point and pauses; PLAY while held keeps playing after release. | `Deck::cue_press_while_paused`, `Deck::play` |
+| 4 | **Hot cue while playing, quantize on:** jump immediately, keeping the beat phase (land as far from the hot cue as the playhead was from its nearest beat), rather than waiting for the next beat. Exactly half a beat rounds to the next beat. | `Deck::hot_cue_press_while_playing` |
+| 5 | **Hot cue while paused:** jump and play while held, return to the hot cue and pause on release. The main cue point doesn't move. | `Deck::hot_cue_press_while_paused` |
+| 6 | **Empty hot cue pad:** stores the current position (snapped with quantize). Kept in the engine only, not saved to the library (editing comes later). | `Deck::hot_cue_set` |
+| 7 | **Hot loop pad** (a hot cue with an end): activates that loop and jumps to it. | `Deck::activate_hot_loop` |
+| 8 | **On load:** the deck waits paused at the earliest memory cue, else at 0 s (no auto-cue to the first sound); hot cues go onto pads A–H. Tempo, range and sync carry over from the previous track. Loading onto a playing deck stops it (no load lock). | `Engine::load`, `Deck::load` |
+| 9 | **Beat jump:** moves exactly N beats on the grid, keeping the phase, with or without quantize. Inside an active loop the loop moves too (CDJ-3000 loop move). Clamped at 0 s. | `Deck::beat_jump` |
+| 10 | **Auto beat loop:** starts on the nearest beat with quantize (which can be just ahead of the playhead; the deck plays into it), else at the playhead. With a loop active, `deck_loop` resizes it from its start; the same size again does **not** toggle it off (the UI can call `deck_loop_exit`). A shorter loop wraps the playhead into it in phase. | `Deck::beat_loop` |
+| 11 | **Seeking or jumping outside an active loop** ends it. | `Deck::jump_to` |
+| 12 | **Tempo range change** keeps the tempo when it fits, otherwise clamps it. | `Deck::set_tempo_range` |
+| 13 | **Sync tempo:** the master's effective BPM (its grid BPM × tempo), matched at half or double time when that's closer to the track's own tempo. **Sync phase:** a jump into phase when off by more than 10 ms (sync engaged mid-play, synced deck starts, unquantized jump on the master), otherwise a tempo correction of at most ±1 % above a 0.5 ms dead band. No phase lock while the synced deck is previewing or either deck is in a loop that isn't a whole number of beats. | `Core::update_rates`, `Core::sync_target`, `SYNC_*` constants |
+| 14 | **Master:** the first deck to start playing; passes to the other deck when the master pauses, ends or loads a new track while the other plays; `deck_set_master` picks it. Sync on with no master makes the other deck master if it's playing, otherwise this one. | `Core::apply`, `Core::set_sync`, `Core::hand_over_master` |
+| 15 | **Tempo fader on a synced deck** is ignored while it follows the master. Turning sync off, or becoming master, keeps the synced tempo (no jump back to the fader position). | `Core::apply` (`SetTempo`), `Core::keep_synced_tempo` |
+| 16 | **Crossfader curve:** constant power (both decks −3 dB in the middle). | `mixer::crossfader_gains` |
+| 17 | **Channel fader and master volume:** linear gain, no fader taper. | `Mixer::process` |
+| 18 | **EQ:** isolator (Linkwitz-Riley 24 dB/oct) with crossovers at 250 Hz and 2.5 kHz, range −80 dB (kill) to +6 dB. rekordbox's EQ type, curve and frequencies are unknown. | `mixer::LOW_MID_HZ`, `MID_HIGH_HZ` |
+| 19 | **MP3 encoder delay** (LAME/Xing gapless info) is **not** trimmed, so the first decoded frame is time 0. If rekordbox trims it, every MP3 cue and grid would be ~25 ms off here: compare against a known grid. | `decode::TRIM_ENCODER_DELAY` |
+| 20 | **Track end:** the deck stops at the end; PLAY there does nothing until the deck is moved. | `Deck::render`, `Deck::play` |
 
 ## D. Deck UI (after A–C)
 

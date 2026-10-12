@@ -1,7 +1,7 @@
 //! The engine handle: what the command layer and the desktop app hold.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -26,6 +26,8 @@ use crate::{Error, Result};
 const QUEUE: usize = 256;
 /// How long a command waits for the audio thread to apply it.
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
+/// How long a command waits while the output device is still opening.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the event thread looks for changes.
 pub(crate) const EVENT_POLL: Duration = Duration::from_millis(5);
 /// Output rate of the offline engine unless told otherwise.
@@ -105,6 +107,11 @@ pub(crate) struct Shared {
     handler: Mutex<Option<EventHandler>>,
     pump: Mutex<EventPump>,
     pub shutdown: AtomicBool,
+    /// The audio callback (or the silent fallback) is running.
+    pub output_ready: AtomicBool,
+    /// The core's output rate, readable without touching the core (which
+    /// only the audio thread may lock while a stream runs).
+    pub device_rate: AtomicU32,
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -130,6 +137,8 @@ impl Shared {
             handler: Mutex::new(None),
             pump: Mutex::new(EventPump::default()),
             shutdown: AtomicBool::new(false),
+            output_ready: AtomicBool::new(false),
+            device_rate: AtomicU32::new(device_rate),
         })
     }
 
@@ -235,8 +244,9 @@ pub(crate) fn mixer_state(settings: &MixerSettings) -> MixerState {
 
 impl Engine {
     /// Starts the engine on the default output device, on its own thread.
-    /// If no device can be opened it runs silently on a timer (see
-    /// [`OutputInfo::error`]) so decks still work.
+    /// Returns without waiting for the device to open; the first commands
+    /// wait for it instead. If no device can be opened the engine runs
+    /// silently on a timer (see [`OutputInfo::error`]) so decks still work.
     pub fn start() -> Result<Engine> {
         let shared = Shared::new(OFFLINE_SAMPLE_RATE, Clock::Real(Instant::now()));
         let (output, output_thread) = output::start(shared.clone())?;
@@ -316,11 +326,9 @@ impl Engine {
         self.inner.shared.now_ms()
     }
 
+    /// The output sample rate.
     pub fn sample_rate(&self) -> u32 {
-        match lock(&self.inner.shared.output_info).as_ref() {
-            Some(info) => info.sample_rate,
-            None => lock(&self.inner.shared.core).device_rate(),
-        }
+        self.inner.shared.device_rate.load(Ordering::Relaxed)
     }
 
     pub fn output(&self) -> Option<OutputInfo> {
@@ -349,7 +357,12 @@ impl Engine {
         } else {
             let started = Instant::now();
             while shared.snapshot().applied_seq < seq {
-                if started.elapsed() > COMMAND_TIMEOUT {
+                let limit = if shared.output_ready.load(Ordering::Acquire) {
+                    COMMAND_TIMEOUT
+                } else {
+                    STARTUP_TIMEOUT
+                };
+                if started.elapsed() > limit {
                     return Err(Error::NotResponding);
                 }
                 std::thread::sleep(Duration::from_micros(250));

@@ -36,37 +36,27 @@ pub(crate) enum OutputMessage {
     Failed(String),
 }
 
-/// Starts the output thread and waits until audio (or the silent fallback)
-/// is running.
+/// Starts the output thread. It returns at once: opening a device can take
+/// a moment, and commands simply wait for the first callback to apply them
+/// (`Shared::output_ready` says when audio, or the silent fallback, runs).
 pub(crate) fn start(shared: Arc<Shared>) -> Result<(mpsc::Sender<OutputMessage>, JoinHandle<()>)> {
     let (tx, rx) = mpsc::channel();
-    let (ready_tx, ready_rx) = mpsc::channel();
     let thread_tx = tx.clone();
     let thread = std::thread::Builder::new()
         .name("tuneox-audio-out".into())
-        .spawn(move || run(shared, rx, thread_tx, ready_tx))
+        .spawn(move || run(shared, rx, thread_tx))
         .map_err(|e| Error::Output(format!("couldn't start the audio thread: {e}")))?;
-    // Opening a device can take a moment; don't hang if it takes forever.
-    let _ = ready_rx.recv_timeout(Duration::from_secs(10));
     Ok((tx, thread))
 }
 
-fn run(
-    shared: Arc<Shared>,
-    rx: mpsc::Receiver<OutputMessage>,
-    tx: mpsc::Sender<OutputMessage>,
-    ready: mpsc::Sender<()>,
-) {
-    let mut ready = Some(ready);
+fn run(shared: Arc<Shared>, rx: mpsc::Receiver<OutputMessage>, tx: mpsc::Sender<OutputMessage>) {
     loop {
         if shared.shutdown.load(Ordering::Relaxed) {
             return;
         }
         let error = match open(&shared, tx.clone()) {
             Ok(stream) => {
-                if let Some(ready) = ready.take() {
-                    let _ = ready.send(());
-                }
+                shared.output_ready.store(true, Ordering::Release);
                 match rx.recv() {
                     Ok(OutputMessage::Failed(message)) => {
                         drop(stream);
@@ -85,9 +75,7 @@ fn run(
             latency_ms: 0.0,
             error: Some(error),
         });
-        if let Some(ready) = ready.take() {
-            let _ = ready.send(());
-        }
+        shared.output_ready.store(true, Ordering::Release);
         if run_silent(&shared, &rx) {
             return;
         }
@@ -144,6 +132,7 @@ fn open(
         config.buffer_size = BufferSize::Fixed(PREFERRED_BUFFER.clamp(min, max));
     }
     lock(&shared.core).set_device_rate(sample_rate);
+    shared.device_rate.store(sample_rate, Ordering::Relaxed);
 
     let build = |config: cpal::StreamConfig| match supported.sample_format() {
         SampleFormat::F32 => build::<f32>(&device, config, shared, tx.clone()),

@@ -413,7 +413,14 @@ impl Core {
                 let beat_seconds = 60.0 / (target.track_bpm * target.rate);
                 let error = error_beats * beat_seconds;
                 if error.abs() > SYNC_SNAP_SECONDS {
-                    if let Some(to) = d.grid.as_ref().map(|g| g.shift(d.pos, error_beats)) {
+                    if let Some(mut to) = d.grid.as_ref().map(|g| g.shift(d.pos, error_beats)) {
+                        // Stay inside a loop: it's whole beats, so wrapping
+                        // keeps the phase.
+                        if let Some(lp) = d.active_loop
+                            && (to < lp.start || to >= lp.end)
+                        {
+                            to = lp.start + (to - lp.start).rem_euclid(lp.end - lp.start);
+                        }
                         d.jump_to(to);
                     }
                 } else if error.abs() > SYNC_DEADBAND_SECONDS {
@@ -450,10 +457,11 @@ impl Core {
             .unwrap_or(1.0);
         let rate = lead_bpm * factor / track_bpm;
         let lock_phase = slave.play_latched
-            && slave.active_loop.is_none()
             && !slave.stalled
+            && loop_keeps_phase(slave)
             && lead.moving()
-            && !lead.stalled;
+            && !lead.stalled
+            && loop_keeps_phase(lead);
         let phase_error = lock_phase.then(|| {
             let target = lead_grid.beat_at(lead.pos) * factor;
             wrap_phase(target - slave_grid.beat_at(slave.pos))
@@ -504,6 +512,20 @@ impl Core {
             hot_cues: d.hot_cues,
             jumps: d.jumps,
         }
+    }
+}
+
+/// Whether the deck's beat phase runs on steadily: no loop, or a loop of
+/// whole beats. A ½-beat loop restarts the phase every wrap, so sync leaves
+/// phase alone (tempo stays matched) until the loop ends.
+fn loop_keeps_phase(deck: &Deck) -> bool {
+    match (deck.active_loop, &deck.grid) {
+        (None, _) => true,
+        (Some(lp), Some(grid)) => {
+            let beats = grid.beat_at(lp.end) - grid.beat_at(lp.start);
+            beats > 0.99 && (beats - beats.round()).abs() < 0.01
+        }
+        (Some(_), None) => false,
     }
 }
 
