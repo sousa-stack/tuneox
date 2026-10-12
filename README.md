@@ -12,6 +12,8 @@ TuneOx imports your existing rekordbox library, analyzes your tracks, lets you p
 - **No lag.** Setting a cue, scrolling a waveform or searching the library responds on the next frame. Disk writes never block the UI.
 - **Faster than rekordbox.** Fast startup, instant search across 100k+ tracks, and analysis that uses every CPU core.
 - **Your library comes with you.** Import tracks, playlists, cues, beatgrids and analysis from an existing rekordbox install without re-analyzing.
+- **Drive it with an AI agent.** Everything TuneOx can do is a command, available from the app, the `tuneox` CLI and an MCP server. Ask Claude (or any MCP client) to build a set, cue a playlist or prep a USB, and watch it happen in the app with undo.
+- **Everything is free.** Features that sit behind a rekordbox subscription or hardware unlock are free in TuneOx. No plans, no license checks.
 
 ## Roadmap
 
@@ -21,6 +23,7 @@ TuneOx imports your existing rekordbox library, analyzes your tracks, lets you p
 - Analysis: BPM and beatgrid, key, waveforms (preview, detail, 3-band color)
 - Cue editor: hot cues, memory cues, loops, colors, comments
 - Export to USB: OneLibrary, then Device Library, with incremental sync
+- `tuneox` CLI and MCP server covering all of the above
 
 **Milestone 2: Performance mode**
 - Decks, mixer, sync, key lock, FX, sampler

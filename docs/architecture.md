@@ -1,18 +1,16 @@
 # Architecture
 
-TuneOx is a headless Rust core with a thin desktop UI on top. Everything that touches audio, files or the database lives in the core; the UI renders state and sends commands. That split is what lets us hit the latency goals, and it keeps the UI replaceable.
+TuneOx is a headless Rust core with thin front ends on top. Everything that touches audio, files or the database lives in the core. The desktop UI, the `tuneox` CLI and the MCP server are all clients of the same command layer, so anything a person can do in the UI, an LLM agent or a script can do too. That split is also what lets us hit the latency goals, and it keeps the UI replaceable.
 
 ```
-┌──────────────────────────── apps/desktop (Tauri 2) ────────────────────────────┐
-│  React + TypeScript UI                                                         │
-│  - library tables (virtualized), playlists, cue editor                         │
-│  - waveforms drawn on the GPU (WebGL2) from data cached in the UI process      │
-│                                                                                │
-│        commands ▼            ▲ events (state diffs, playhead clock)            │
-│  src-tauri: thin command/event layer, binary IPC for waveform data             │
-└────────────────────────────────────────┬───────────────────────────────────────┘
-                                         │
+ apps/desktop (Tauri 2)             tuneox CLI                 tuneox mcp
+ React + TS UI, GPU waveforms       scripts, CI, power users   LLM agents (Claude etc.)
+          │ Tauri IPC                      │                          │ MCP over stdio
+          └───────────────────┬────────────┴──────────────────────────┘
+                              ▼
 ┌──────────────────────────────── Rust core (crates/) ───────────────────────────┐
+│  tuneox-commands   every user-facing operation as a typed command: schema,     │
+│                    description, effect class, undo, dry run, progress          │
 │  tuneox-core       domain types: Track, Cue, Loop, BeatGrid, Playlist, Waveform│
 │  tuneox-library    SQLite library DB, FTS5 search, write-behind persistence    │
 │  tuneox-analysis   decode, BPM + beatgrid, key, waveform generation            │
@@ -23,6 +21,16 @@ TuneOx is a headless Rust core with a thin desktop UI on top. Everything that to
 ```
 
 Crates are added as each piece gets built; this is the target layout.
+
+## Automation: commands, CLI and MCP
+
+TuneOx is built to be driven by an LLM as well as by hand, for requests like "build a 90-minute peak-time set from my tech house at 124–128 BPM in harmonic order", "put a memory cue on the first downbeat of every track in this playlist", or "export my Saturday playlists to the stick in the XDJ-AZ".
+
+1. **Every feature is a command first.** A feature lands as a command in `tuneox-commands`: typed request and response (serde), a JSON Schema, and a description written for both people and models. The UI, the CLI and the MCP server are generated from or mapped onto that one registry. A feature that exists only in the UI is a bug.
+2. **Three front doors, one behavior.** Tauri IPC for the desktop app, `tuneox <command> --json` for scripts and tests, `tuneox mcp` for agents. MCP tools come from the command registry; the library, playlists and tracks are also exposed as MCP resources.
+3. **One process owns the library.** When the desktop app is running, it owns the database and serves the command layer on a local socket; the CLI and MCP server connect to it, so an agent's changes show up in the UI live and nothing is written twice. When the app isn't running, the CLI or MCP server opens the library itself (headless) and holds the lock.
+4. **Agents get guard rails, not a separate API.** Every command declares an effect class: read, edit, destructive or device write. Edits are undoable and recorded in a history the UI shows ("Claude changed 42 cues — undo"). Destructive commands and device writes support `dry_run`, which returns exactly what would change, and require an explicit `confirm`.
+5. **Built for bulk work.** Commands take filters and ID lists, so "every track in playlist X" is one call, not hundreds. Results are compact and structured with stable IDs. Long jobs (analysis, export) return a job ID with progress events.
 
 ## Latency rules
 

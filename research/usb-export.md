@@ -44,7 +44,52 @@ Findings:
 - **Both formats share the analysis and audio files.** OneLibrary's `content.analysisDataFilePath` and `content.path` point at the same `/PIONEER/USBANLZ/...` and `/Contents/...` files that Device Library uses. Only the database file differs, so an export writes ANLZ files and copies audio once and then writes two databases.
 - **rekordbox 7.2.9 already writes both.** 78 of the 79 OneLibrary playlists also appear by name in `export.pdb`. The track counts are close too: 4,163 OneLibrary tracks against 4,173 analysis files.
 - **FAT32 timestamps are unreliable.** `exportLibrary.db` has an mtime of Feb 17, but its own `property.createdDate` says 2026-05-29. Don't judge which library is newer from file dates.
-- **OneLibrary's `cue` table is empty** on this stick, even though the tracks have cues. On Device Library, cues live only in the ANLZ files (`export.pdb` has no cue table), and OneLibrary players presumably read them from the same ANLZ files. To confirm.
+- **OneLibrary's `cue` table is empty** on this stick, even though the tracks have cues. The cues are in the ANLZ files; the reference export below confirms it track by track.
+
+## Reference export: rekordbox 7.2.19, one playlist, four tracks
+
+`TUNEOX-TEST`: a fresh FAT32 stick with one playlist (`10-9-26`) of four 44.1 kHz/16-bit AIFF tracks, exported by rekordbox 7.2.19. Copied to `.re/fixtures/usb-tuneox-test-7.2.19/`, excluding `PIONEER/extracted/gcred.dat` (looks like stored credentials; never read or copy it). This is the export TuneOx's output gets compared against.
+
+```
+Contents/<artist>/<album>/<title, truncated>.aiff
+PIONEER/rekordbox/export.pdb, exportExt.pdb, exportLibrary.db
+PIONEER/USBANLZ/P014/00024E40/ANLZ0000.DAT|.EXT|.2EX     one directory per track
+PIONEER/Artwork/00001/a1..a4.jpg, a1_m..a4_m.jpg, b1..b4.jpg, b1_m..b4_m.jpg
+PIONEER/MYSETTING.DAT, MYSETTING2.DAT, DJMMYSETTING.DAT, djprofile.nxs
+PIONEER/extracted/gcred.dat
+```
+
+- A fresh export has no `DEVSETTING.DAT` or `RBFLTR.DAT`, so those come from the players or older rekordbox versions.
+- Audio file names are truncated (e.g. `Cinema (Galantis R.aiff`) and keep non-ASCII characters (`B€NZ`).
+- Artwork comes in two sets. OneLibrary's `image` table points at `b1..b4.jpg`; presumably Device Library uses `a1..a4.jpg`. Confirm with a PDB parser. `_m` is presumably a smaller size.
+- While rekordbox had the stick open, `exportLibrary.db-wal` and `-shm` existed; they were gone after it closed. A copy in a read-only directory couldn't be opened with a plain read-only connection (`SQLITE_READONLY_DIRECTORY`), but `?immutable=1` works. TuneOx's stick reader must handle this, and its writer should finish with no `-wal`/`-shm` left behind.
+- OneLibrary schema is identical between rekordbox 7.2.9 and 7.2.19.
+- `content.masterDbId` is `djmdDevice.MasterDBID` of the exporting rekordbox, and `content.masterContentId` is the track's `djmdContent.ID`. `analysedBits` = 41 on all four tracks. `cueUpdateCount`, `analysisDataUpdateCount` and `informationUpdateCount` are NULL on a fresh export.
+
+### Cues live in the ANLZ files, not the database
+
+The OneLibrary `cue` table is empty even though the four tracks have 15 cues in rekordbox. The ANLZ files hold them, and the counts match `master.db` exactly:
+
+| Track | master.db cues | `.DAT` PCOB | `.EXT` PCOB | `.EXT` PCO2 |
+| --- | --- | --- | --- | --- |
+| Cheque | 2 hot | 2 hot | 0 | 2 hot |
+| B€NZ | 3 hot | 3 hot | 0 | 3 hot |
+| Cinema | 2 hot, 1 memory | 2 hot, 1 memory | 0 | 2 hot, 1 memory |
+| Bulletproof | 7 hot (A–G) | 3 hot | 4 hot | 7 hot |
+
+So `.DAT` carries at most three hot cues (A–C, for older players), the `.EXT` PCOB carries the rest, and `.EXT` PCO2 (extended cues with colors and comments) carries all of them.
+
+The Bulletproof hot cues use `djmdCue.Kind` 1, 2, 3, 5, 6, 7, 8 for A–G, skipping 4. That supports the community mapping (D = 5), which makes the 65 `Kind = 4` rows in the main library (see `rekordbox-masterdb.md`) more interesting.
+
+### ANLZ sections per file
+
+| File | Sections |
+| --- | --- |
+| `.DAT` | `PPTH PVBR PQTZ PWAV PWV2 PCOB PCOB` |
+| `.EXT` | `PPTH PWV3 PCOB PCOB PCO2 PCO2 [PQT2] PWV5 PWV4 PSSI` (`PQT2` missing on one track) |
+| `.2EX` | `PPTH PWV7 PWV6 PWVC PVDI` |
+
+`PVDI` in `.2EX` isn't in Deep Symmetry's documentation. Find out what it is with REA.
 
 ## OneLibrary schema (`exportLibrary.db`, `property.dbVersion = 1000`)
 
@@ -61,5 +106,7 @@ Compared with `master.db`, the schema is cleaner. Column names are camelCase, th
 
 - Does the XDJ-AZ accept a Device Library-only stick, a OneLibrary-only stick, or need both?
 - The one OneLibrary playlist whose name isn't found in `export.pdb`: probably a non-ASCII name stored as UTF-16. Check once we have a PDB parser.
-- Confirm that OneLibrary players take cues from ANLZ files when the `cue` table is empty.
+- Cues: rekordbox 7.2.19 leaves the OneLibrary `cue` table empty and puts every cue in the ANLZ files (see the reference export above). Still to confirm on the XDJ-AZ that cues from a TuneOx export show up.
+- What the `.2EX` `PVDI` section holds.
+- What `content.analysedBits = 41` encodes (likely a bitmask of which analyses are present).
 - What the files outside `rekordbox/` are (`DEVSETTING.DAT`, `MYSETTING*.DAT`, `DJMMYSETTING.DAT`, `djprofile.nxs`, `RBFLTR.DAT`) and which ones a fresh export must create.

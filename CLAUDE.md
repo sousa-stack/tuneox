@@ -10,6 +10,9 @@ These decide whether a change is done:
 - Cue edits, waveform scroll/zoom and search respond on the next frame. Never make the UI await a disk write or a core round trip on an interactive path (see "Latency rules" in the architecture doc).
 - Faster than rekordbox at startup, search and analysis.
 
+- Every feature is a command in the core first, reachable from the UI, the `tuneox` CLI and the MCP server (see "Automation" in the architecture doc). Don't build UI-only features.
+- Features that are paid in rekordbox are free in TuneOx. Never add plan gating or license checks.
+
 Test hardware: an XDJ-AZ (reads OneLibrary) is always available; CDJ-3000s (read Device Library) are available through friends. See [research/usb-export.md](research/usb-export.md) for which player reads which format.
 
 ## Reverse engineering rekordbox with REA

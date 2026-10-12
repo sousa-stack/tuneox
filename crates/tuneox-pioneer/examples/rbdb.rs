@@ -22,7 +22,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "onelibrary" => keys::onelibrary()?,
         _ => return Err(USAGE.into()),
     };
-    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // immutable=1: never touch the file or create -wal/-shm next to it. rekordbox
+    // 7.2.19 leaves exportLibrary.db in WAL mode, which otherwise needs a
+    // writable directory even for reads.
+    let conn = Connection::open_with_flags(
+        format!("file:{path}?immutable=1"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
     conn.pragma_update(None, "key", key)?;
 
     match args.next() {
