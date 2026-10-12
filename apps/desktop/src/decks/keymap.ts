@@ -106,13 +106,16 @@ export function bindKey(code: string, mods: Modifiers): KeyBinding | null {
   return { deck: mods.shiftKey ? 2 : 1, action: act, held };
 }
 
-/** Typing in these never triggers deck keys. */
+/**
+ * Typing in these never triggers deck keys. A focused `<select>` (the beat
+ * jump size) isn't one: deck keys take precedence over its keyboard use.
+ */
 export function isTextEntry(target: EventTarget | null): boolean {
   if (!target || typeof (target as Element).closest !== "function") return false;
   const element = target as HTMLElement;
   if (element.isContentEditable) return true;
   const tag = element.tagName;
-  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag === "TEXTAREA") return true;
   if (tag !== "INPUT") return false;
   const type = (element as HTMLInputElement).type;
   return !["button", "checkbox", "radio", "range", "submit", "reset", "color"].includes(type);

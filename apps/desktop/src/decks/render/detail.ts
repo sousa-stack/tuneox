@@ -106,7 +106,10 @@ export class DetailView {
     }
     const pxPerUs = this.pxPerUs(span, state);
     const cx = g.centerX;
-    const xAt = (us: number) => Math.round(cx + (us - lane.position) * pxPerUs);
+    // Track pixel at the canvas's left edge. Tiles and markers both snap to
+    // it, so grid lines never shimmer against the waveform while scrolling.
+    const origin = Math.round(lane.position * pxPerUs) - cx;
+    const xAt = (us: number) => Math.floor(us * pxPerUs) - origin;
     const lw = Math.max(1, Math.round(u));
 
     // Waveform tiles.
@@ -114,7 +117,6 @@ export class DetailView {
     if (wf && wf.columnsPerSecond) {
       const cpp = wf.columnsPerSecond / (pxPerUs * 1e6);
       const key = `${state.track_id}|${wf.style}|${cpp.toFixed(8)}|${g.lane}|${i}`;
-      const origin = Math.round(lane.position * pxPerUs) - cx;
       const total = Math.ceil(wf.columns / cpp);
       const first = Math.max(0, Math.floor(origin / TILE_WIDTH));
       const last = Math.min(Math.floor((total - 1) / TILE_WIDTH), Math.floor((origin + g.width - 1) / TILE_WIDTH));

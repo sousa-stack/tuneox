@@ -49,6 +49,7 @@ cargo run -p tuneox-cli -- --help             # CLI
 cargo run -p tuneox-cli -- commands --json    # command catalog with JSON schemas (= MCP tools)
 cd apps/desktop && bun install && bun run tauri dev            # desktop app, dev mode
 cd apps/desktop && bun run tauri build --bundles app           # → target/release/bundle/macos/TuneOx.app
+cd apps/desktop && bun test                                    # frontend unit tests (deck logic, waveform painters)
 ```
 
 The desktop app, CLI and MCP server open the library at `$TUNEOX_LIBRARY` if set, else `~/Library/Application Support/TuneOx/library.db` (macOS) or the OS data folder elsewhere. **When testing against real data, point `TUNEOX_LIBRARY` at a scratch file under `.re/`** so nobody's real TuneOx library is touched:

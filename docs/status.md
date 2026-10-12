@@ -32,6 +32,7 @@ _Last updated: 2026-10-12_
 
 **Desktop app**
 - Library view: Collection and playlist tree, virtualized track table (10k+ tracks), instant local search and sorting, Camelot keys, responsive columns, detail panel with cues and beat grid summary, first-run import with live progress.
+- Dual player (spec part D) above the library, after rekordbox's DUAL PLAYER: stacked facing detail waveforms with one shared playhead and bar counters, overviews, BLUE/RGB/3Band waveforms drawn with rekordbox's colours (3Band default), beat grid, hot cue/memory cue/loop markers, transport (CUE press/release, beat jump, loops, hot cues, memory cues), tempo −/+/typed BPM/reset, pitch bend, BEAT SYNC (orange when it falls back to BPM sync), MASTER, Q, DUAL CONTROL, A-GAIN, band kills, crossfader, mixer extras (EQ, channel faders, master), HOT CUE / MEMORY lists, loading by drag/context menu/double-click, rekordbox's EXPORT key map, error toasts. Cached waveform tiles and one animation loop driven by the engine clock (~1 ms of drawing per frame); frontend unit tests under `bun test`.
 
 **Waveform data** (`get_waveform`)
 - All six rekordbox waveforms (blue, RGB, 3-band × overview, detail) decode from ANLZ files on demand into `tuneox_core::Waveform` (~0.2 ms for a 5-minute detail waveform), with the 3-band gains (`PWVC`).
@@ -45,8 +46,8 @@ _Last updated: 2026-10-12_
 ## In progress
 
 **Decks: waveforms, preview player and dual player** (spec: [specs/decks.md](specs/decks.md))
-- Parts A (research), B (waveform data) and C (audio engine + deck commands) are done; see above.
-- Next: deck UI (part D) in rekordbox's DUAL PLAYER layout: stacked facing detail waveforms with one playhead, overviews, transport, tempo, sync, crossfader, band kills and Auto Gain, driven by the engine's `tuneox://deck` / `tuneox://mixer` events.
+- Parts A (research), B (waveform data), C (audio engine + deck commands) and D (deck UI) are done; see above.
+- Left: the browser preview player (needs an engine preview voice), memory cue set/delete and hot cue delete, saving pad cues and A-GAIN trims to the library, key lock.
 
 ## Next
 
@@ -69,7 +70,7 @@ _Last updated: 2026-10-12_
 - Decks: hot cues stored from the pads live only in the engine until cue editing exists; no memory cue set/delete, hot cue delete or automatic active loops yet.
 - Decks: a few behaviors are still guesses (the spec's "Open behavior questions"): pitch bend amount, crossfader curve, some defaults, and whether MP3 encoder delay should be trimmed.
 - Decks: the output is always the default device (no device picker); AAC is LC only (symphonia has no HE-AAC); 24-bit sources are stored at 16 bits.
-- The desktop's `tuneox://deck` forwarding is built but hasn't been exercised in a running GUI yet.
+- Deck UI gaps (spec part D, "Not built"): key shift / KEY SYNC / MT, the MEMORY button, INFO tab, phrase bars, artwork, the Matching button. Dragging the enlarged waveform scrubs with repeated seeks, which is choppier to the ear than rekordbox's drag.
 
 ## Decision log
 

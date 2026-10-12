@@ -24,12 +24,16 @@ export interface DeckView {
 
 function viewKey(state: DeckState): string {
   const atCue = isAtCue(state);
-  // Everything except where a moving playhead has got to.
+  // Everything except where a moving playhead has got to. A variable grid's
+  // BPM drifts beat by beat; the display shows two decimals.
+  const round = (bpm: number | null) => (bpm == null ? null : Math.round(bpm * 100));
   return JSON.stringify({
     ...state,
     position_us: state.playing ? 0 : state.position_us,
     at_ms: 0,
     rate: state.rate > 0,
+    bpm: round(state.bpm),
+    original_bpm: round(state.original_bpm),
     atCue,
   });
 }
