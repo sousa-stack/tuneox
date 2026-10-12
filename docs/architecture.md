@@ -14,7 +14,7 @@ TuneOx is a headless Rust core with thin front ends on top. Everything that touc
 │  tuneox-core       domain types: Track, Cue, Loop, BeatGrid, Playlist, Waveform│
 │  tuneox-library    SQLite library DB, FTS5 search, write-behind persistence    │
 │  tuneox-analysis   decode, BPM + beatgrid, key, waveform generation            │
-│  tuneox-audio      playback engine (preview player now, decks later)           │
+│  tuneox-audio      playback engine: decode, two decks, sync, mixer, output     │
 │  tuneox-pioneer    rekordbox/Pioneer formats: master.db, ANLZ, PDB, OneLibrary │
 │  tuneox-export     USB sync: diff library vs device, write files, copy audio   │
 │  tuneox-mcp        MCP server over the command registry (stdio)                │
@@ -44,6 +44,22 @@ These are the reasons TuneOx should feel faster than rekordbox. Treat them as re
 5. **The audio thread never blocks.** No allocation, locks or I/O on the real-time thread. It talks to the rest of the core through lock-free queues.
 6. **Library views are virtualized and paged.** Only visible rows are rendered or fetched. Search uses SQLite FTS5 plus in-memory indexes, so it stays instant at 100k+ tracks.
 7. **Analysis uses every core** and is prioritized: the loaded track first, then tracks visible on screen, then the rest of the collection. It can be cancelled.
+
+### Audio engine threads
+
+`tuneox-audio` keeps the real-time path separate from everything else:
+
+| Thread | Does | Talks through |
+| --- | --- | --- |
+| Audio callback (cpal) | Applies queued commands, renders both decks (cubic resampling, tempo, loops), sync, mixer. No allocation, locks, logging or I/O. | Pops commands from an `rtrb` SPSC queue; writes a state snapshot to a `triple_buffer` once per block; pushes replaced tracks onto a "garbage" queue so they're freed elsewhere. |
+| Output (`tuneox-audio-out`) | Opens the default device and owns the cpal stream (so the engine handle is `Send + Sync`), reopens it if the device disappears, or drives the core silently on a timer when there's no device. | |
+| Events (`tuneox-audio-events`) | Every 5 ms: turns the latest snapshot into `DeckState`/`MixerState` events (on change, ~20 Hz while playing), frees garbage. | Engine event handler (the desktop app re-emits as `tuneox://deck` / `tuneox://mixer`). |
+| Decoder (`tuneox-decode`, one per load) | symphonia decode into 16-bit stereo chunks (4 bytes/frame, ~10.6 MB per minute at 44.1 kHz) that the audio thread reads while decoding continues. | Atomics: chunks are published through `OnceLock`, the decoded frame count with release/acquire. |
+| Callers (commands) | `Engine` methods queue a command and return once the audio thread has applied it (one device buffer, ~1–6 ms), with the resulting state. | The command queue (behind a mutex on the non-real-time side) and the snapshot. |
+
+The audio callback reaches the DSP core through a `Mutex` it only ever `try_lock`s: in real-time mode nothing else takes that lock while a stream runs, so it's one atomic swap, and if it were ever contended the callback would output silence rather than wait. The offline engine (`Engine::offline`) runs the same core on the caller's thread, with time advanced by `render`, which is how the tests drive it.
+
+Positions in the clock (`position_us` at `at_ms`) are what's heard: the callback adds the device's reported output latency to the time a block is rendered.
 
 ## Device export
 

@@ -31,6 +31,7 @@ Every change updates the docs it affects **in the same commit**:
 | `crates/tuneox-library` | TuneOx's own SQLite library: schema (`schema.sql`), FTS5 search, transactional imports. |
 | `crates/tuneox-commands` | The command registry. Every user-facing operation, with JSON schemas and an effect class. |
 | `crates/tuneox-mcp` | MCP server over the registry (stdio; modern 2026-07-28 and legacy protocol versions). |
+| `crates/tuneox-audio` | Audio engine: decoding (symphonia), two decks, sync, mixer, cpal output on its own thread. The DSP core is real-time safe and renders offline for tests (`Engine::offline`). `examples/decode_check.rs` decodes files without playing them. |
 | `apps/cli` | The `tuneox` binary: subcommands, `run <command> <json>`, `commands`, `mcp`. |
 | `apps/desktop` | Tauri app. `src-tauri/src/lib.rs` exposes one `run_command` bridge; `src/` is React + TypeScript. |
 | `research/` | What we learned about rekordbox, in our own words, with evidence. |
