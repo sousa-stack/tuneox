@@ -37,10 +37,39 @@ Observed on rekordbox 7.2.9 (macOS), against a real library of 10,361 tracks. Re
 - `djmdCue.InMsec` / `OutMsec`: milliseconds. `OutMsec = -1` means a cue point rather than a loop.
 - `djmdCue.InFrame`: `InMsec × 150 / 1000`, truncated. 1/150 s is the CDJ "frame" unit (420 ms → 63, 1318 ms → 197).
 - `djmdCue.CueMicrosec`: present but `0` on every row sampled; sub-millisecond precision may only be filled by newer analysis. Unverified.
-- `djmdCue.Color` = `255` with `ColorTableIndex` = `0` seen on default-colored hot cues.
+- `djmdCue.Color` = `255` with `ColorTableIndex` = `0` seen on default-colored hot cues. TuneOx imports `ColorTableIndex` (when > 0) as the cue's palette color.
+- `djmdContent.FileType`: 1 = MP3, 4 = M4A, 11 = WAV, 12 = AIFF (observed); 5 = FLAC per pyrekordbox.
+- `djmdContent.ColorID`: 0 = none, 1–8 = Pink, Red, Orange, Yellow, Green, Aqua, Blue, Purple (`djmdColor.Commnt`).
+- `djmdContent.Rating`: 0–5 stars.
+- `djmdContent.FolderPath`: the full path of the audio file, including the file name.
+- `djmdContent.Analysed`: 105 or 121 on every track (a bitmask; not decoded yet).
+- `djmdContent.DJPlayCount` is sometimes stored as text, so read numbers type-agnostically.
+- `djmdKey.ScaleName` mixes notations in one library: Camelot (`5A`, `11B`), classic names (`Am`, `Amin`, `Dmin`, `Em`), and a placeholder `All`. 787 of 10,361 tracks have no key.
+- `djmdPlaylist.ParentID` is the literal string `root` for top-level playlists. `Seq` orders siblings starting at 1.
+- `djmdProperty.DBID` identifies the library; USB exports carry it as OneLibrary `content.masterDbId`.
+
+## Cue kinds
+
+| `Kind` | Meaning | Evidence |
+| --- | --- | --- |
+| 0 | Memory cue or memory loop | 442 rows, 208 of them loops |
+| 1, 2, 3 | Hot cues A, B, C | rekordbox 7.2.19 export: ANLZ PCO2 slots 1–3 at the same times |
+| 5, 6, 7, 8, 9 | Hot cues D, E, F, G, H | Same export: a track with kinds 1, 2, 3, 5, 6, 7, 8 has PCO2 hot cues A–G |
+| 4 | A loop with no hot cue slot | All 65 rows are loops, none colored, about 84% of the way into the track; 30 of the 65 tracks also have a kind 5 (D), so 4 isn't D |
+
+Kind 1 cues are mostly rekordbox's automatic first-downbeat cue: 8,962 of 9,037 have a comment such as `1.1Bars`, at position 0.
+
+How rekordbox exports kind 4 is still unknown. 64 of the 65 tracks are on the `ROCKITTRAX6` stick, so reading its ANLZ files will answer it. Until then TuneOx imports kind 4 as a memory loop and keeps the raw kind in `cue.source_kind`.
+
+## Local analysis files
+
+rekordbox keeps per-track analysis files under `~/Library/Pioneer/rekordbox/share/PIONEER/USBANLZ/<3 hex>/<uuid fragment>/` (3.9 GB for 10,361 tracks):
+
+- `ANLZ0000.DAT`, `.EXT`, `.2EX`: same formats as on a USB export. The cue sections exist but are empty locally; cues live only in `djmdCue` and are written into ANLZ files at export time.
+- `ANLZ0000.3EX` (10,353 files): not a PMAI file. It's MessagePack starting with `{"embedding": …}`, an audio embedding vector, presumably for track suggestions and related tracks. It never appears on USB exports.
 
 ## Open questions
 
-- **`djmdCue.Kind` values.** Observed distribution: 0 (442), 1 (9,037), 2 (1,299), 3 (1,211), 4 (65), 5 (720), 6 (314), 7 (86), 8 (18), 9 (2). 0 is a memory cue. Community docs map hot cues A–H to 1, 2, 3, 5, 6, 7, 8, 9 (skipping 4), but this library has 65 rows with `Kind = 4`. Find out what 4 is.
-- **`djmdPlaylist.Attribute`.** Every playlist in the sample library is `0`, so folder and smart-list values still need confirming against a library that has them.
-- **`contentCue` vs `djmdCue`.** Which one wins if they disagree, and does rekordbox 7 still read `djmdCue` at all?
+- **`djmdPlaylist.Attribute`.** Every playlist in the sample library is `0`. TuneOx assumes 1 = folder and 4 = smart playlist (per pyrekordbox); confirm with a library that has them.
+- **`contentCue` vs `djmdCue`.** Which one wins if they disagree, and does rekordbox 7 still read `djmdCue` at all? TuneOx reads `djmdCue`; its counts match the ANLZ files in a fresh export.
+- **`djmdContent.Analysed`** bitmask meaning.

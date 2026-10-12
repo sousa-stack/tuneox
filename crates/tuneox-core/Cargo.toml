@@ -1,0 +1,13 @@
+[package]
+name = "tuneox-core"
+description = "TuneOx domain types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+schemars.workspace = true
+serde.workspace = true

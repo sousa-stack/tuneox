@@ -52,11 +52,21 @@ cd apps/desktop && bun install && bun run tauri dev   # run the desktop app
 
 The rekordbox database keys (`TUNEOX_MASTERDB_KEY`, `TUNEOX_ONELIBRARY_KEY`) are compiled in by `crates/tuneox-pioneer/build.rs`, from the environment or from the gitignored `.keys.env` at the repo root. CI and release builds get them from GitHub Actions secrets. Never write the key values into source, docs or commit messages.
 
-Research tool for both SQLCipher databases (prints the schema, or runs a query):
+The `tuneox` CLI (`apps/cli`) runs any core command. Use a scratch library under `.re/` when testing against real data, so the user's real TuneOx library isn't touched:
+
+```bash
+cargo run -p tuneox-cli -- --library .re/tuneox-test-library.db import-rekordbox --dry-run
+cargo run -p tuneox-cli -- --library .re/tuneox-test-library.db search --bpm-min 124 --bpm-max 128 --compatible-with 8A
+cargo run -p tuneox-cli -- commands --json        # the command catalog with JSON schemas (= MCP tools)
+cargo run -p tuneox-cli -- run get_track '{"id": 1}'
+```
+
+Research tools for rekordbox's SQLCipher databases (prints the schema, or runs a query) and analysis files:
 
 ```bash
 cargo run -p tuneox-pioneer --example rbdb -- masterdb .re/fixtures/master.db
 cargo run -p tuneox-pioneer --example rbdb -- onelibrary .re/fixtures/usb-rockittrax6/exportLibrary.db "SELECT ..."
+cargo run -p tuneox-pioneer --example anlz_dump -- path/to/ANLZ0000.EXT
 ```
 
 REA notes:

@@ -1,0 +1,23 @@
+[package]
+name = "tuneox-commands"
+description = "Every TuneOx operation as a typed command, shared by the UI, CLI and MCP server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+dirs.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tuneox-core.workspace = true
+tuneox-library.workspace = true
+tuneox-pioneer.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true

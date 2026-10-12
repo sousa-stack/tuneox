@@ -1,0 +1,18 @@
+[package]
+name = "tuneox-library"
+description = "The TuneOx library database"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+rusqlite.workspace = true
+thiserror.workspace = true
+tuneox-core.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

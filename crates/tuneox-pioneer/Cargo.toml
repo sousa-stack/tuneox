@@ -11,6 +11,7 @@ publish = false
 rusqlite.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tuneox-core.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
