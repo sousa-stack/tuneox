@@ -89,7 +89,7 @@ The Bulletproof hot cues use `djmdCue.Kind` 1, 2, 3, 5, 6, 7, 8 for A–G, skipp
 | `.EXT` | `PPTH PWV3 PCOB PCOB PCO2 PCO2 [PQT2] PWV5 PWV4 PSSI` (`PQT2` missing on one track) |
 | `.2EX` | `PPTH PWV7 PWV6 PWVC PVDI` |
 
-`PVDI` in `.2EX` isn't in Deep Symmetry's documentation. Find out what it is with REA.
+`PVDI` in `.2EX` isn't in Deep Symmetry's documentation. rekordbox's symbols identify it as vocal detection data; its layout isn't decoded yet. `PWVC` is the 3-band waveform gains (see `waveforms.md`).
 
 ## OneLibrary schema (`exportLibrary.db`, `property.dbVersion = 1000`)
 
@@ -107,6 +107,6 @@ Compared with `master.db`, the schema is cleaner. Column names are camelCase, th
 - Does the XDJ-AZ accept a Device Library-only stick, a OneLibrary-only stick, or need both?
 - The one OneLibrary playlist whose name isn't found in `export.pdb`: probably a non-ASCII name stored as UTF-16. Check once we have a PDB parser.
 - Cues: rekordbox 7.2.19 leaves the OneLibrary `cue` table empty and puts every cue in the ANLZ files (see the reference export above). Still to confirm on the XDJ-AZ that cues from a TuneOx export show up.
-- What the `.2EX` `PVDI` section holds.
+- The layout of the `.2EX` `PVDI` section, which is rekordbox's vocal detection data (`get_pmai_ex2_vocal_detect_point_num`; see `waveforms.md`).
 - What `content.analysedBits = 41` encodes (likely a bitmask of which analyses are present).
 - What the files outside `rekordbox/` are (`DEVSETTING.DAT`, `MYSETTING*.DAT`, `DJMMYSETTING.DAT`, `djprofile.nxs`, `RBFLTR.DAT`) and which ones a fresh export must create.

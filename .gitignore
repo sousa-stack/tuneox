@@ -26,3 +26,6 @@ dist/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Agent worktrees (Claude Code)
+.claude/worktrees/
