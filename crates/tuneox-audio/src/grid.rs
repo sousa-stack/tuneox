@@ -56,7 +56,8 @@ impl Grid {
     pub(crate) fn beat_at(&self, t: f64) -> f64 {
         let n = self.times.len();
         let first = self.times[0];
-        if n == 1 || t < first {
+        // NaN takes this branch too: the audio thread must never panic.
+        if n == 1 || t < first || t.is_nan() {
             return (t - first) / self.interval(0);
         }
         // Beats at or before t.
@@ -127,6 +128,8 @@ mod tests {
             assert!((g.beat_at(g.time_at(b)) - b).abs() < 1e-9, "{b}");
         }
         assert_eq!(g.bpm_at(1.0), 120.0);
+        assert!(g.beat_at(f64::NAN).is_nan(), "no panic");
+        assert!(g.time_at(f64::NAN).is_nan());
         assert!((g.nearest_beat(0.84) - 0.6).abs() < 1e-12);
         assert!((g.nearest_beat(0.86) - 1.1).abs() < 1e-12);
         assert!((g.shift(0.35, 4.0) - 2.35).abs() < 1e-12);
