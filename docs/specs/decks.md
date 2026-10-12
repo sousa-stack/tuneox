@@ -260,6 +260,43 @@ Build the UI from [research/rekordbox-decks.md](../research/rekordbox-decks.md);
 
 **Browser preview player** (rekordbox's Preview column): a waveform thumbnail column; clicking it previews from that position and pauses any playing deck. Needs a preview voice in the engine (see "Later" if not built yet).
 
+### As built
+
+Status: **built** (UI agent, 2026-10-12), except the browser preview player (no engine preview voice yet) and the items under "Not built" below. Code: `apps/desktop/src/decks/` (state, logic, rendering) and `apps/desktop/src/components/decks/` (panels).
+
+**Layout.** The DUAL PLAYER sits between the toolbar and the library, `clamp(380px, 50vh, 470px)` tall (450 px at 1440×900, 400 px at 1280×800). Columns: operation (beat jump `‹ ›` + size, CUE, PLAY/PAUSE per deck, DUAL CONTROL between) · mixer (A-GAIN knob ±12 dB with `+0.0dB` readout, HIGH/MID/LOW kill pills, vertical crossfader with A on top) · TuneOx extras behind the toolbar's **Mixer** toggle (EQ knobs, channel faders, master volume) · decks (A's info row, overview and function row; the stacked detail waveforms; B's) · HOT CUE / MEMORY lists. The toolbar also has the waveform style (BLUE / RGB / 3BAND, persisted) and a **Decks** toggle that hides the player (rekordbox's FULL BROWSER).
+
+**Waveforms.** Painted per research §4 into `ImageData` by pure functions (`decks/waveform.ts`, unit-tested): 3Band span layering with the overlap colours and the raised-cosine high band, BLUE/RGB detail with rekordbox's 3-bit colour quantization, 3Band overviews stacked from `three_band` previews, RGB/BLUE overviews from the `rgb` preview (§4.2/§4.3 rules; PWV4 heights on a 0–127 scale). Choices where the research leaves room:
+
+| Question | Choice |
+| --- | --- |
+| PWVC `band_gains` on the detail | **Not applied**: the stored PWV7 levels already include them (research/waveforms.md), and applying them again would cap the low band at 80 % on most tracks and clip mids with gains up to 3.0. One constant (`APPLY_DETAIL_BAND_GAINS`) flips it. |
+| High band curve | Applied at draw time (rekordbox's `draw3BandsWaveCDJ` does), on top of the curve baked in at analysis. |
+| Time axis | **Real time**: scroll speed is constant and beat spacing follows the tempo, so synced decks' beats line up across the shared playhead. rekordbox has a preference for either; its default is unknown. |
+| Zoom | Visible span 2, 4, 6, 8, 12, 16, 24 or 32 s across the lane, **default 8 s** (rekordbox PERFORMANCE's default step), shared by both lanes so beats stay comparable. `−` / `RST` / `+` on the left edge; `=`, `-`, `⇧=` keys. The grid hides past 120 s, which these spans never reach. |
+| Markers | A 14 px marker strip on each lane's outer edge holds hot cue flags (coloured square, dark letter) and memory cue triangles (memory loops as a bar); hot cue lines and loop overlays cover the lane; the current cue is an orange triangle on the baseline; the bar counter sits beside the playhead in the strip, left of it so upcoming flags stay visible. |
+| Memory cue colour | Palette colour if the library cue has `color` > 0, else red #FF0000 (§4.5's CDJ default). |
+| Overview played part | Drawn at 42 % brightness; the playhead is #E0E0E0 playing, #FF0000 paused. |
+| A style a track lacks | Falls back to another style the track has; while a newly chosen style loads, the previous one stays on screen. |
+
+**Rendering.** Detail waveforms are pre-rendered into tiles 1024 device pixels wide, aligned to the track and cached per track, style, scale, lane height and direction (14 per lane, LRU); a zoom or tempo change starts a new set. Overviews are pre-rendered once per track, style and size. One `requestAnimationFrame` loop (`decks/render/animator.ts`) draws both decks: it blits the visible tiles at the playhead offset, draws grid, cues, loops, playheads and bar counters, redraws an overview only when its playhead pixel or markers change, and writes the time displays straight into the DOM. React re-renders only when a deck's non-clock state, the mixer or settings change. Measured in a desktop browser against a stand-in for the engine, at 1440×900 (DPR 1) with both decks playing: about 0.8 ms of drawing per frame. Painting one Retina-sized tile (1024 × 180 device pixels, real data) takes 0.7 ms for 3Band and 0.3–0.4 ms for RGB/BLUE, so a zoom change that repaints both lanes costs one ~5 ms frame. ⌥⇧P shows a timing overlay in the app; the numbers in the real window at Retina resolution are still to be taken.
+
+**Clock and commands.** Positions follow part C's clock (minimum `performance.now() − sent_at_ms`; a reply's `at_ms` gives a provisional offset until the first event), wrapping inside an active loop between events. States older than the latest `at_ms` are ignored. Every control updates the screen at once: play, pause, seek, load, sync, master, quantize and tempo steps patch the shown state until the command's reply replaces it; mixer changes show immediately and an engine echo never undoes one still in flight. Seeks and mixer drags coalesce (one request in flight, only the latest value waits). Errors appear as toasts.
+
+**Controls as built.** CUE, hot cue pads and pitch bend send press on pointer down and release on up. DUAL CONTROL sends PLAY/PAUSE (decided by the pressed deck), CUE and beat jump to both loaded decks, keys included. Beat jump "Fine" is a 5 ms `deck_seek` (PERFORMANCE's FINE). The function row shows the manual loop (IN, OUT, RELOOP/EXIT) and the auto loop (`‹ N ›`, default 4 beats; `‹ ›` also resize an active loop) side by side instead of rekordbox's AT/MT switch. `− BPM +` steps 0.02 %, 0.1 % once held 500 ms (auto-repeat every 50 ms after 300 ms); double-click the BPM to type one. Clicking a detail lane moves that deck's playhead there; dragging scrubs it (`deck_seek`, play state kept). Clicking or dragging the overview seeks. Tracks load by dragging a row onto a deck (mouse events, not HTML5 drag and drop, which the window uses for files), the row's context menu, or double-click (deck A unless it's playing, else B).
+
+**Keyboard** (EXPORT preset; plain = deck A, ⇧ = deck B; ignored while typing in a text field; ⌘/Ctrl/⌥ combinations are left to the app, so ⌘F still searches): Space play/pause · C cue (press/release) · ← → beat jump · 1 2 3 hot cues A–C (press/release) · I / O / R loop in / out / exit-reloop · 4–9 beat loops 1–32 · `/` halve the loop size · A S D F G H J K L ; call memory cues 1–10 · N / B next / previous memory cue · Q quantize · T time mode · F1 sync · F3 tempo reset · F4 / F5 pitch bend (press/release) · F6 / F7 BPM −/+ (hold to repeat). Shared: `=` / `-` zoom, `⇧=` reset zoom.
+
+**Not built:** key shift, KEY SYNC and MT (no key lock), the MEMORY button, ⌘1–3 / M / X (no memory cue set/delete or hot cue delete commands), the INFO tab, phrase bars, the Matching button, artwork, the browser preview column, ⌥¥ (loop ×2 on JIS keyboards).
+
+**Backend requests** (from the UI work):
+1. Colours and comments on `DeckState.hot_cues` / `memory_cues`. Today the UI matches engine cues to `get_track`'s library cues by slot and position (±1.5 ms) to colour them.
+2. Commands for memory cue set/delete and hot cue delete, so MEMORY, M, X and ⌘1–3 can work.
+3. A scrub/jog command for dragging the enlarged waveform: repeated `deck_seek`s each fade out and in (~3 ms), which sounds choppy compared with rekordbox's scratch-like drag.
+4. Saving A-GAIN trims with the track (rekordbox does).
+
+**Testing.** `cd apps/desktop && bun test` runs the unit tests (clock, colours and palette, waveform decoding and painters, grid and bar counter, key map); CI runs it after the frontend build.
+
 ## Later
 
 - Browser preview voice in the engine (`preview_play` { track_id, position_us } / `preview_stop`), if part C doesn't include it.

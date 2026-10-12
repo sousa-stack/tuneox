@@ -18,9 +18,13 @@ interface Props {
   onSelect: (id: number) => void;
   sort: Sort | null;
   onSort: (column: ColumnId) => void;
+  /** Mouse down on a row: may become a drag onto a deck. */
+  onRowMouseDown?: (row: Item["row"], event: MouseEvent) => void;
+  onRowDoubleClick?: (id: number) => void;
+  onRowContextMenu?: (id: number, x: number, y: number) => void;
 }
 
-export function TrackTable({ items, selectedId, onSelect, sort, onSort }: Props) {
+export function TrackTable({ items, selectedId, onSelect, sort, onSort, onRowMouseDown, onRowDoubleClick, onRowContextMenu }: Props) {
   const tableRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -88,7 +92,16 @@ export function TrackTable({ items, selectedId, onSelect, sort, onSort }: Props)
                   key={`${row.id}:${item.position}`}
                   className={`tr${row.id === selectedId ? " selected" : ""}${virtual.index % 2 ? " odd" : ""}`}
                   style={{ gridTemplateColumns: template, height: ROW_HEIGHT, transform: `translateY(${virtual.start}px)` }}
-                  onMouseDown={() => onSelect(row.id)}
+                  onMouseDown={(e) => {
+                    onSelect(row.id);
+                    onRowMouseDown?.(row, e.nativeEvent);
+                  }}
+                  onDoubleClick={() => onRowDoubleClick?.(row.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    onSelect(row.id);
+                    onRowContextMenu?.(row.id, e.clientX, e.clientY);
+                  }}
                 >
                   <span className="color-dot" style={{ background: row.color ? TRACK_COLORS[row.color] : "transparent" }} />
                   {columns.map((column) => cell(column, item))}
