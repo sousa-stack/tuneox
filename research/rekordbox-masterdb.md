@@ -55,11 +55,11 @@ Observed on rekordbox 7.2.9 (macOS), against a real library of 10,361 tracks. Re
 | 0 | Memory cue or memory loop | 442 rows, 208 of them loops |
 | 1, 2, 3 | Hot cues A, B, C | rekordbox 7.2.19 export: ANLZ PCO2 slots 1–3 at the same times |
 | 5, 6, 7, 8, 9 | Hot cues D, E, F, G, H | Same export: a track with kinds 1, 2, 3, 5, 6, 7, 8 has PCO2 hot cues A–G |
-| 4 | A loop with no hot cue slot | All 65 rows are loops, none colored, about 84% of the way into the track; 30 of the 65 tracks also have a kind 5 (D), so 4 isn't D |
+| 4 | A loop with no hot cue slot, exported as a memory loop | All 65 rows are loops (about 2–4 s long), uncolored, about 84% of the way into the track; 30 of the 65 tracks also have a kind 5 (D). On the `ROCKITTRAX6` stick, rekordbox 7.2.9 wrote every kind 4 loop sampled (5 tracks) as a memory loop (`PCO2` hot cue 0) at the same in/out times |
 
-Kind 1 cues are mostly rekordbox's automatic first-downbeat cue: 8,962 of 9,037 have a comment such as `1.1Bars`, at position 0.
+Kind 1 cues are mostly rekordbox's automatic first-downbeat cue: 8,962 of 9,037 have a comment such as `1.1Bars`, at position 0. The comment is exported into the `PCO2` entry.
 
-How rekordbox exports kind 4 is still unknown. 64 of the 65 tracks are on the `ROCKITTRAX6` stick, so reading its ANLZ files will answer it. Until then TuneOx imports kind 4 as a memory loop and keeps the raw kind in `cue.source_kind`.
+How kind 4 differs from a kind 0 memory loop inside rekordbox is unknown, but it doesn't matter for export. TuneOx imports kind 4 as a memory loop and keeps the raw kind in `cue.source_kind`.
 
 ## Local analysis files
 

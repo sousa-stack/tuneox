@@ -61,6 +61,12 @@ cargo run -p tuneox-cli -- commands --json        # the command catalog with JSO
 cargo run -p tuneox-cli -- run get_track '{"id": 1}'
 ```
 
+MCP server: `tuneox mcp` serves every command over stdio (`crates/tuneox-mcp`, both the 2026-07-28 stateless protocol and the older `initialize` handshake). The user's Claude Code has a user-scope MCP entry `tuneox` pointing at `~/.local/bin/tuneox mcp`, which uses the real library in `~/Library/Application Support/TuneOx/`. After changing commands, reinstall the binary and restart Claude Code:
+
+```bash
+cargo install --locked --path apps/cli --root ~/.local
+```
+
 Research tools for rekordbox's SQLCipher databases (prints the schema, or runs a query) and analysis files:
 
 ```bash

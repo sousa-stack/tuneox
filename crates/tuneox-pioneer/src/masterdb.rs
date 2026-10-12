@@ -245,8 +245,9 @@ impl MasterDb {
 }
 
 /// `djmdCue.Kind` to a hot cue slot (0 = A). 0 is a memory cue; hot cues
-/// A–C are 1–3 and D–H are 5–9. Kind 4 is a loop without a hot cue slot
-/// (see `research/rekordbox-masterdb.md`), so it imports as a memory loop.
+/// A–C are 1–3 and D–H are 5–9. Kind 4 is a loop without a hot cue slot,
+/// which rekordbox exports as a memory loop (see
+/// `research/rekordbox-masterdb.md`).
 pub fn hot_cue_slot(kind: i64) -> Option<u8> {
     match kind {
         1..=3 => Some(kind as u8 - 1),
@@ -257,7 +258,7 @@ pub fn hot_cue_slot(kind: i64) -> Option<u8> {
 
 /// Whether TuneOx knows what a `djmdCue.Kind` value means.
 pub fn is_known_cue_kind(kind: i64) -> bool {
-    matches!(kind, 0..=3 | 5..=9)
+    (0..=9).contains(&kind)
 }
 
 fn track_color(id: i64) -> Option<TrackColor> {
@@ -321,8 +322,9 @@ mod tests {
                 None
             ]
         );
-        assert!(!is_known_cue_kind(4));
+        assert!(is_known_cue_kind(4));
         assert!(is_known_cue_kind(9));
+        assert!(!is_known_cue_kind(10));
     }
 
     #[test]

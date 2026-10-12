@@ -75,8 +75,14 @@ impl Context {
     }
 
     pub fn on_progress(mut self, report: impl FnMut(&Progress) + 'static) -> Self {
-        self.progress = Box::new(report);
+        self.set_progress(report);
         self
+    }
+
+    /// Replaces the progress handler, e.g. to route one call's progress to
+    /// the client that made it.
+    pub fn set_progress(&mut self, report: impl FnMut(&Progress) + 'static) {
+        self.progress = Box::new(report);
     }
 
     fn progress(&mut self, stage: &str, done: u64, total: u64) {
@@ -118,11 +124,19 @@ fn info<C: Command>() -> CommandInfo {
         name: C::NAME,
         description: C::DESCRIPTION,
         effect: C::EFFECT,
-        input_schema: serde_json::to_value(schemars::schema_for!(C::Input))
-            .expect("schemas serialize"),
-        output_schema: serde_json::to_value(schemars::schema_for!(C::Output))
-            .expect("schemas serialize"),
+        input_schema: schema::<C::Input>(),
+        output_schema: schema::<C::Output>(),
     }
+}
+
+/// JSON Schema 2020-12 with every definition inlined: some MCP clients and
+/// models handle `$ref` poorly.
+fn schema<T: JsonSchema>() -> Value {
+    let schema = schemars::generate::SchemaSettings::draft2020_12()
+        .with(|s| s.inline_subschemas = true)
+        .into_generator()
+        .into_root_schema_for::<T>();
+    serde_json::to_value(schema).expect("schemas serialize")
 }
 
 fn run_typed<C: Command>(ctx: &mut Context, input: Value) -> Result<Value> {

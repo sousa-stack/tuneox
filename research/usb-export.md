@@ -79,7 +79,7 @@ The OneLibrary `cue` table is empty even though the four tracks have 15 cues in 
 
 So `.DAT` carries at most three hot cues (A–C, for older players), the `.EXT` PCOB carries the rest, and `.EXT` PCO2 (extended cues with colors and comments) carries all of them.
 
-The Bulletproof hot cues use `djmdCue.Kind` 1, 2, 3, 5, 6, 7, 8 for A–G, skipping 4. That supports the community mapping (D = 5), which makes the 65 `Kind = 4` rows in the main library (see `rekordbox-masterdb.md`) more interesting.
+The Bulletproof hot cues use `djmdCue.Kind` 1, 2, 3, 5, 6, 7, 8 for A–G, skipping 4, which confirms the community mapping (D = 5). Kind 4 turned out to be a slotless loop that rekordbox exports as a memory loop (see `rekordbox-masterdb.md`).
 
 ### ANLZ sections per file
 

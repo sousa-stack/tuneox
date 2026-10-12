@@ -1,0 +1,17 @@
+[package]
+name = "tuneox-mcp"
+description = "MCP server exposing TuneOx commands as tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+tuneox-commands.workspace = true
+
+[dev-dependencies]
+tuneox-core.workspace = true
+tuneox-library.workspace = true

@@ -75,6 +75,8 @@ enum Cmd {
     Track { id: i64 },
     /// List every command with its JSON schemas (the MCP tool catalog).
     Commands,
+    /// Run the MCP server on stdin/stdout, for Claude and other MCP clients.
+    Mcp,
     /// Run any command by name with JSON input.
     Run {
         name: String,
@@ -121,6 +123,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let library = Library::open(&library_path)?;
     let mut ctx = Context::new(library, Some(library_path)).on_progress(show_progress);
 
+    if let Cmd::Mcp = cli.command {
+        // stdout carries protocol messages only; diagnostics go to stderr.
+        tuneox_mcp::serve(&mut ctx, std::io::stdin().lock(), std::io::stdout())?;
+        return Ok(());
+    }
+
     let (name, input) = match cli.command {
         Cmd::ImportRekordbox {
             rekordbox_dir,
@@ -157,7 +165,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&output)?);
             return Ok(());
         }
-        Cmd::Commands => unreachable!(),
+        Cmd::Commands | Cmd::Mcp => unreachable!(),
     };
 
     let output = tuneox_commands::run_json(&mut ctx, name, strip_nulls(input))?;

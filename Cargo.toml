@@ -14,6 +14,7 @@ tuneox-core = { path = "crates/tuneox-core" }
 tuneox-pioneer = { path = "crates/tuneox-pioneer" }
 tuneox-library = { path = "crates/tuneox-library" }
 tuneox-commands = { path = "crates/tuneox-commands" }
+tuneox-mcp = { path = "crates/tuneox-mcp" }
 
 clap = { version = "4", features = ["derive"] }
 dirs = "6"

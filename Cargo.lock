@@ -3826,6 +3826,7 @@ dependencies = [
  "serde_json",
  "tuneox-commands",
  "tuneox-library",
+ "tuneox-mcp",
 ]
 
 [[package]]
@@ -3871,6 +3872,16 @@ dependencies = [
  "thiserror 2.0.21",
  "tuneox-core",
  "uuid",
+]
+
+[[package]]
+name = "tuneox-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tuneox-commands",
+ "tuneox-core",
+ "tuneox-library",
 ]
 
 [[package]]

@@ -4,7 +4,30 @@ An open-source DJ library manager and rekordbox alternative. [tuneox.com](https:
 
 TuneOx imports your existing rekordbox library, analyzes your tracks, lets you prep cues and playlists, and exports USB drives that Pioneer DJ / AlphaTheta media players read natively.
 
-> Status: pre-alpha. Nothing to download yet.
+> Status: pre-alpha. Nothing to download yet. What works today: importing a rekordbox library, searching it, and driving it from Claude through the MCP server.
+
+## Try it from source
+
+You need Rust. Reading rekordbox's databases also needs their SQLCipher keys at build time: official builds include them, and source builds read them from a gitignored `.keys.env` (see `crates/tuneox-pioneer/src/keys.rs`). Without them TuneOx builds and runs, but can't import from rekordbox.
+
+Build and install the `tuneox` command:
+
+```bash
+cargo install --locked --path apps/cli
+```
+
+Import your rekordbox library (rekordbox's files are only read, never changed), then search it:
+
+```bash
+tuneox import-rekordbox
+tuneox search --bpm-min 124 --bpm-max 128 --compatible-with 8A
+```
+
+Use it from Claude Code (or any MCP client):
+
+```bash
+claude mcp add --scope user tuneox -- tuneox mcp
+```
 
 ## Goals
 

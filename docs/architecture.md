@@ -17,6 +17,7 @@ TuneOx is a headless Rust core with thin front ends on top. Everything that touc
 │  tuneox-audio      playback engine (preview player now, decks later)           │
 │  tuneox-pioneer    rekordbox/Pioneer formats: master.db, ANLZ, PDB, OneLibrary │
 │  tuneox-export     USB sync: diff library vs device, write files, copy audio   │
+│  tuneox-mcp        MCP server over the command registry (stdio)                │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 

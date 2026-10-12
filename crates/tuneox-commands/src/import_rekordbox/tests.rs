@@ -132,7 +132,10 @@ fn imports_a_rekordbox_library() {
         3 + 1,
         "deleted cues skipped; the duplicate's cue dropped"
     );
-    assert_eq!(report.cues_with_unmapped_kind.get("4"), Some(&1));
+    assert!(
+        report.cues_with_unmapped_kind.is_empty(),
+        "kind 4 is a known memory loop"
+    );
     assert_eq!(report.playlists.found, 3);
     assert_eq!(report.smart_playlists, 1);
     assert_eq!(report.skipped_playlist_entries, 1);
