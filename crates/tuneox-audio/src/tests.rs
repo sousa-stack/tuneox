@@ -12,7 +12,10 @@ use tuneox_core::{Beat, BeatGrid, Cue};
 use crate::core::Control;
 use crate::deck::FADE;
 use crate::engine::lock;
-use crate::{Engine, EngineEvent, Error, LoadRequest, MixerSettingsUpdate, Source};
+use crate::{
+    BendDirection, Engine, EngineEvent, Error, LoadRequest, MemoryCueTarget, MixerSettingsUpdate,
+    Source, SyncMode,
+};
 
 const RATE: u32 = 48_000;
 /// One output sample at 48 kHz, in microseconds.
@@ -159,6 +162,7 @@ fn samples(
         cues,
         bpm: None,
         duration_secs: None,
+        auto_gain_db: None,
     }
 }
 
@@ -235,14 +239,20 @@ fn loads_a_track_with_grid_and_cues() {
     assert_eq!(state.duration_us, 10_000_000);
     assert!(!state.playing);
     assert_eq!(state.rate, 0.0);
-    // The first memory cue is the cue point, and the deck waits there.
-    assert_eq!(state.cue_us, 1_000_000);
-    assert_eq!(state.position_us, 1_000_000);
+    // Parked at the start with no cue (rekordbox EXPORT mode).
+    assert_eq!(state.cue_us, None);
+    assert_eq!(state.position_us, 0);
     assert_eq!(state.original_bpm, Some(120.0));
     assert_eq!(state.bpm, Some(120.0));
+    assert_eq!(state.sync_mode, SyncMode::Off);
+    assert!(state.quantize);
     assert_eq!(state.hot_cues.len(), 1);
     assert_eq!(state.hot_cues[0].slot, 2);
     assert_eq!(state.hot_cues[0].start_us, 4_000_000);
+    // Memory cues in position order.
+    let starts: Vec<i64> = state.memory_cues.iter().map(|c| c.start_us).collect();
+    assert_eq!(starts, [1_000_000, 2_000_000]);
+    assert_eq!(state.memory_cues[1].index, 1);
     assert_eq!(engine.deck(2).unwrap().track_id, None);
 }
 
@@ -318,6 +328,7 @@ fn file(path: &Path) -> LoadRequest {
         cues: Vec::new(),
         bpm: None,
         duration_secs: None,
+        auto_gain_db: None,
     }
 }
 
@@ -523,14 +534,23 @@ fn click_deck(engine: &Engine, deck: u8, bpm: f64, first_beat: f64, cues: Vec<Cu
 }
 
 #[test]
-fn cue_button_follows_cdj_conventions() {
+fn cue_button_follows_rekordbox() {
     let engine = Engine::offline(RATE);
-    click_deck(&engine, 1, 120.0, 0.0, vec![memory_cue(1.0)]);
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+
+    // No cue yet: CUE while playing goes back to the start.
+    engine.play(1).unwrap();
+    render(&engine, 0.3);
+    let state = engine.cue(1, true).unwrap();
+    assert!(!state.playing);
+    assert_eq!(state.position_us, 0);
+    assert_eq!(state.cue_us, None);
+    engine.cue(1, false).unwrap();
 
     // Paused away from the cue: CUE sets it, snapped to the nearest beat.
     engine.seek(1, 2_300_000).unwrap();
     let state = engine.cue(1, true).unwrap();
-    assert_eq!(state.cue_us, 2_500_000);
+    assert_eq!(state.cue_us, Some(2_500_000));
     assert_eq!(state.position_us, 2_500_000);
     assert!(!state.playing);
     engine.cue(1, false).unwrap();
@@ -562,40 +582,38 @@ fn cue_button_follows_cdj_conventions() {
     engine.cue(1, false).unwrap();
 
     // Without quantize the cue lands exactly where the deck is.
-    engine.set_quantize(false).unwrap();
+    assert!(!engine.set_quantize(1, false).unwrap().quantize);
     engine.seek(1, 3_300_000).unwrap();
-    assert_eq!(engine.cue(1, true).unwrap().cue_us, 3_300_000);
+    assert_eq!(engine.cue(1, true).unwrap().cue_us, Some(3_300_000));
 }
 
 #[test]
-fn hot_cues_jump_set_and_preview() {
+fn hot_cues_jump_and_play() {
     let engine = Engine::offline(RATE);
     click_deck(
         &engine,
         1,
         120.0,
         0.0,
-        vec![
-            memory_cue(1.0),
-            hot_cue(0, 4.0, None),
-            hot_cue(1, 8.0, Some(10.0)),
-        ],
+        vec![hot_cue(0, 4.0, None), hot_cue(1, 8.0, Some(10.0))],
     );
+    // Paused (rekordbox's default): jump and play; release changes nothing.
+    let state = engine.hot_cue(1, 0, true).unwrap();
+    assert!(state.playing);
+    assert_eq!(state.position_us, 4_000_000);
+    assert!(engine.hot_cue(1, 0, false).unwrap().playing);
+
     // Playing, 0.2 s after a beat: quantized jump keeps that phase.
-    engine.play(1).unwrap();
-    render(&engine, 0.2);
+    engine.seek(1, 1_200_000).unwrap();
     let state = engine.hot_cue(1, 0, true).unwrap();
     assert!(state.playing);
     assert_near(state.position_us, 4_200_000, 0.5, "phase-kept jump");
-    assert!(
-        engine.hot_cue(1, 0, false).unwrap().playing,
-        "release while playing"
-    );
+    engine.hot_cue(1, 0, false).unwrap();
 
     // An empty pad stores the (snapped) position.
     let state = engine.hot_cue(1, 2, true).unwrap();
     let c = state.hot_cues.iter().find(|c| c.slot == 2).unwrap();
-    assert_eq!(c.start_us, 4_000_000);
+    assert_eq!((c.start_us, c.end_us), (4_000_000, None));
     engine.hot_cue(1, 2, false).unwrap();
 
     // A hot loop starts looping.
@@ -603,6 +621,12 @@ fn hot_cues_jump_set_and_preview() {
     let lp = state.active_loop.unwrap();
     assert_eq!((lp.start_us, lp.end_us), (8_000_000, 10_000_000));
     engine.hot_cue(1, 1, false).unwrap();
+    // An empty pad during a loop stores the loop as a hot loop.
+    let state = engine.hot_cue(1, 3, true).unwrap();
+    let c = state.hot_cues.iter().find(|c| c.slot == 3).unwrap();
+    assert_eq!((c.start_us, c.end_us), (8_000_000, Some(10_000_000)));
+    engine.hot_cue(1, 3, false).unwrap();
+    engine.loop_exit(1).unwrap();
     // Just before a beat, the phase-kept landing point would be before the
     // loop: it lands at the same phase inside the loop instead.
     engine.seek(1, 4_400_000).unwrap();
@@ -617,7 +641,8 @@ fn hot_cues_jump_set_and_preview() {
     engine.hot_cue(1, 1, false).unwrap();
     engine.loop_exit(1).unwrap();
 
-    // Paused: plays while held, returns on release.
+    // Gate mode: from pause, a hot cue plays only while held.
+    assert!(engine.set_hot_cue_gate(true).unwrap().hot_cue_gate);
     engine.pause(1).unwrap();
     let state = engine.hot_cue(1, 0, true).unwrap();
     assert!(state.playing);
@@ -626,16 +651,152 @@ fn hot_cues_jump_set_and_preview() {
     let state = engine.hot_cue(1, 0, false).unwrap();
     assert!(!state.playing);
     assert_eq!(state.position_us, 4_000_000);
+    // …except for hot loops, which latch.
+    engine.hot_cue(1, 1, true).unwrap();
+    assert!(engine.hot_cue(1, 1, false).unwrap().playing);
+    engine.set_hot_cue_gate(false).unwrap();
 
     // Without quantize the jump is exact.
-    engine.set_quantize(false).unwrap();
+    engine.set_quantize(1, false).unwrap();
     engine.seek(1, 6_123_000).unwrap();
-    engine.play(1).unwrap();
     assert_eq!(engine.hot_cue(1, 0, true).unwrap().position_us, 4_000_000);
     assert!(matches!(
         engine.hot_cue(1, 8, true),
         Err(Error::InvalidInput(_))
     ));
+}
+
+fn memory_loop(start: f64, end: f64) -> Cue {
+    Cue {
+        hot_cue: None,
+        ..hot_cue(0, start, Some(end))
+    }
+}
+
+#[test]
+fn memory_cues_jump_and_pause() {
+    let engine = Engine::offline(RATE);
+    click_deck(
+        &engine,
+        1,
+        120.0,
+        0.0,
+        vec![memory_cue(6.0), memory_cue(2.0), memory_loop(10.0, 12.0)],
+    );
+    engine.play(1).unwrap();
+    render(&engine, 0.5);
+    // By index (position order): jump, pause, and it's the cue point.
+    let state = engine.memory_cue(1, MemoryCueTarget::Index(1)).unwrap();
+    assert!(!state.playing);
+    assert_eq!(state.position_us, 6_000_000);
+    assert_eq!(state.cue_us, Some(6_000_000));
+    // Next: a memory loop is armed; PLAY loops it.
+    let state = engine.memory_cue(1, MemoryCueTarget::Next).unwrap();
+    assert_eq!(state.position_us, 10_000_000);
+    assert!(!state.playing);
+    let lp = state.active_loop.unwrap();
+    assert_eq!((lp.start_us, lp.end_us), (10_000_000, 12_000_000));
+    engine.play(1).unwrap();
+    render(&engine, 2.5);
+    assert_near(
+        engine.deck(1).unwrap().position_us,
+        10_500_000,
+        0.5,
+        "looping",
+    );
+    // Previous: the one before the playhead.
+    let state = engine.memory_cue(1, MemoryCueTarget::Previous).unwrap();
+    assert_eq!(state.position_us, 10_000_000);
+    let state = engine.memory_cue(1, MemoryCueTarget::Previous).unwrap();
+    assert_eq!(state.position_us, 6_000_000);
+    assert!(state.active_loop.is_none(), "left the loop");
+    assert!(matches!(
+        engine.memory_cue(1, MemoryCueTarget::Index(3)),
+        Err(Error::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn manual_loops_reloop_and_resize() {
+    let engine = Engine::offline(RATE);
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+    engine.seek(1, 2_200_000).unwrap();
+    engine.play(1).unwrap();
+    // IN snaps to the beat and sets the cue (real-time cue).
+    let state = engine.loop_in(1).unwrap();
+    assert_eq!(state.loop_in_us, Some(2_000_000));
+    assert_eq!(state.cue_us, Some(2_000_000));
+    render(&engine, 1.0);
+    // OUT at 3.2 s snaps to 3.0 s: the deck is past it, so it wraps in.
+    let state = engine.loop_out(1).unwrap();
+    let lp = state.active_loop.unwrap();
+    assert_eq!(
+        (lp.start_us, lp.end_us, lp.beats),
+        (2_000_000, 3_000_000, Some(2.0))
+    );
+    assert_eq!(state.loop_in_us, None);
+    assert_near(state.position_us, 2_200_000, 0.5, "wrapped into the loop");
+    render(&engine, 1.0);
+    assert_near(
+        engine.deck(1).unwrap().position_us,
+        2_200_000,
+        0.5,
+        "looping",
+    );
+
+    // Resize anchored at loop-in, within 1/64–512 beats.
+    let lp = engine.loop_resize(1, true).unwrap().active_loop.unwrap();
+    assert_eq!((lp.start_us, lp.end_us), (2_000_000, 4_000_000));
+    engine.loop_resize(1, false).unwrap();
+    let lp = engine.loop_resize(1, false).unwrap().active_loop.unwrap();
+    assert_eq!((lp.end_us, lp.beats), (2_500_000, Some(1.0)));
+    for _ in 0..10 {
+        engine.loop_resize(1, false).unwrap();
+    }
+    let lp = engine.deck(1).unwrap().active_loop.unwrap();
+    assert_eq!(lp.beats, Some(1.0 / 64.0));
+
+    // Exit runs on past loop-out; RELOOP goes back and loops again.
+    let state = engine.loop_exit(1).unwrap();
+    assert!(state.active_loop.is_none());
+    assert_eq!(state.last_loop.unwrap().start_us, 2_000_000);
+    render(&engine, 1.0);
+    assert!(engine.deck(1).unwrap().position_us > 3_000_000);
+    let state = engine.reloop(1).unwrap();
+    assert_eq!(state.position_us, 2_000_000);
+    assert!(state.active_loop.is_some());
+    engine.loop_exit(1).unwrap();
+
+    // Auto beat loop: the same size again exits.
+    engine.seek(1, 5_100_000).unwrap();
+    let lp = engine.beat_loop(1, 4.0).unwrap().active_loop.unwrap();
+    assert_eq!(
+        (lp.start_us, lp.end_us, lp.beats),
+        (5_000_000, 7_000_000, Some(4.0))
+    );
+    assert!(engine.beat_loop(1, 4.0).unwrap().active_loop.is_none());
+    engine.beat_loop(1, 256.0).unwrap();
+    engine.loop_resize(1, true).unwrap();
+    let lp = engine.loop_resize(1, true).unwrap().active_loop.unwrap();
+    assert_eq!(lp.beats, Some(512.0));
+    assert!(matches!(
+        engine.beat_loop(1, 1024.0),
+        Err(Error::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn quantize_is_per_deck() {
+    let engine = Engine::offline(RATE);
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+    click_deck(&engine, 2, 120.0, 0.0, vec![]);
+    engine.set_quantize(1, false).unwrap();
+    assert!(engine.deck(2).unwrap().quantize);
+    for deck in [1, 2] {
+        engine.seek(deck, 2_300_000).unwrap();
+    }
+    assert_eq!(engine.cue(1, true).unwrap().cue_us, Some(2_300_000));
+    assert_eq!(engine.cue(2, true).unwrap().cue_us, Some(2_500_000));
 }
 
 #[test]
@@ -807,9 +968,16 @@ fn commands_check_their_deck() {
         engine.beat_loop(1, 4.0),
         Err(Error::NoBeatGrid(1))
     ));
-    assert!(matches!(engine.sync(1, true), Err(Error::NoBeatGrid(1))));
+    assert!(matches!(
+        engine.sync(1, SyncMode::Beat),
+        Err(Error::NoBeatGrid(1))
+    ));
     assert!(matches!(
         engine.beat_loop(1, 0.0),
+        Err(Error::InvalidInput(_))
+    ));
+    assert!(matches!(
+        engine.set_bpm(1, 120.0),
         Err(Error::NoBeatGrid(1))
     ));
     // A library BPM without a grid is enough for beat-based controls.
@@ -857,16 +1025,22 @@ fn sync_matches_tempo_and_phase() {
         "first deck playing is master"
     );
 
-    let state = engine.sync(2, true).unwrap();
-    assert!(state.sync);
+    let state = engine.sync(2, SyncMode::Beat).unwrap();
+    assert_eq!(state.sync_mode, SyncMode::Beat);
     assert!(!state.master);
     assert!((state.bpm.unwrap() - 120.0).abs() < 1e-9);
     assert!((state.tempo_percent - (120.0 / 126.0 - 1.0) * 100.0).abs() < 1e-9);
-    engine.set_tempo(2, 9.0).unwrap();
-    assert!(
-        (engine.deck(2).unwrap().bpm.unwrap() - 120.0).abs() < 1e-9,
-        "locked"
-    );
+    // A synced deck's tempo belongs to the master.
+    for result in [
+        engine.set_tempo(2, 9.0),
+        engine.set_bpm(2, 125.0),
+        engine.tempo_reset(2),
+    ] {
+        assert!(matches!(
+            result,
+            Err(Error::FollowsMaster { deck: 2, master: 1 })
+        ));
+    }
 
     engine.play(2).unwrap();
     render(&engine, 2.0);
@@ -881,21 +1055,24 @@ fn sync_matches_tempo_and_phase() {
     let err = phase_error_ms(&engine, (0.0, 120.0), (0.1, 126.0));
     assert!(err < 1.0, "phase error after tempo change {err} ms");
 
-    // An unquantized jump on the master: the slave jumps back into phase.
-    engine.set_quantize(false).unwrap();
+    // An off-beat jump on the master: the slave jumps back into phase.
     engine.seek(1, 20_123_000).unwrap();
     render(&engine, 0.5);
     let err = phase_error_ms(&engine, (0.0, 120.0), (0.1, 126.0));
     assert!(err < 1.0, "phase error after master jump {err} ms");
 
-    // The master stops: the playing deck takes over and keeps its tempo.
+    // Pausing the master doesn't hand master over.
     engine.pause(1).unwrap();
+    assert!(engine.deck(1).unwrap().master);
+    // Replacing the master's track does; the new master keeps its tempo.
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
     let s2 = engine.deck(2).unwrap();
     assert!(s2.master);
+    assert!(!engine.deck(1).unwrap().master);
     assert!((s2.bpm.unwrap() - 124.8).abs() < 1e-9);
     // Sync off keeps the tempo it had.
-    let s2 = engine.sync(2, false).unwrap();
-    assert!(!s2.sync);
+    let s2 = engine.sync(2, SyncMode::Off).unwrap();
+    assert_eq!(s2.sync_mode, SyncMode::Off);
     assert!((s2.bpm.unwrap() - 124.8).abs() < 1e-9);
 
     assert!(engine.set_master(1).unwrap().master);
@@ -908,7 +1085,7 @@ fn sync_matches_half_and_double_time() {
     click_deck(&engine, 1, 120.0, 0.0, vec![]);
     click_deck(&engine, 2, 63.0, 0.0, vec![]);
     engine.play(1).unwrap();
-    let state = engine.sync(2, true).unwrap();
+    let state = engine.sync(2, SyncMode::Beat).unwrap();
     assert!((state.bpm.unwrap() - 60.0).abs() < 1e-9);
     engine.play(2).unwrap();
     render(&engine, 3.0);
@@ -926,9 +1103,9 @@ fn sync_with_no_master_makes_the_deck_master() {
     let engine = Engine::offline(RATE);
     click_deck(&engine, 1, 120.0, 0.0, vec![]);
     click_deck(&engine, 2, 125.0, 0.0, vec![]);
-    let s1 = engine.sync(1, true).unwrap();
+    let s1 = engine.sync(1, SyncMode::Beat).unwrap();
     assert!(s1.master);
-    let s2 = engine.sync(2, true).unwrap();
+    let s2 = engine.sync(2, SyncMode::Beat).unwrap();
     assert!(!s2.master);
     assert!(
         (s2.bpm.unwrap() - 120.0).abs() < 1e-9,
@@ -964,7 +1141,7 @@ fn sync_holds_on_millisecond_rounded_grids() {
             .unwrap();
     }
     engine.play(1).unwrap();
-    engine.sync(2, true).unwrap();
+    engine.sync(2, SyncMode::Beat).unwrap();
     engine.play(2).unwrap();
     let mut worst: f64 = 0.0;
     for _ in 0..30 {
@@ -980,7 +1157,7 @@ fn sync_and_loops() {
     click_deck(&engine, 1, 120.0, 0.0, vec![]);
     click_deck(&engine, 2, 126.0, 0.1, vec![]);
     engine.play(1).unwrap();
-    engine.sync(2, true).unwrap();
+    engine.sync(2, SyncMode::Beat).unwrap();
     engine.play(2).unwrap();
     render(&engine, 1.0);
 
@@ -1183,13 +1360,188 @@ fn eq_bands_boost_cut_and_kill() {
     assert_eq!(state.channels[0].eq_mid, 6.0);
 }
 
+// Tempo controls ---------------------------------------------------------------
+
+#[test]
+fn bpm_entry_reset_and_limits() {
+    let engine = Engine::offline(RATE);
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+    let state = engine.set_bpm(1, 126.0).unwrap();
+    assert!((state.tempo_percent - 5.0).abs() < 1e-9);
+    assert!((state.bpm.unwrap() - 126.0).abs() < 1e-9);
+    // Outside the ±10 % range or 40–499 BPM: refused with a reason.
+    assert!(matches!(
+        engine.set_bpm(1, 140.0),
+        Err(Error::InvalidInput(_))
+    ));
+    assert!(matches!(
+        engine.set_bpm(1, 20.0),
+        Err(Error::InvalidInput(_))
+    ));
+    let state = engine.tempo_reset(1).unwrap();
+    assert_eq!(state.tempo_percent, 0.0);
+    assert_eq!(state.bpm, Some(120.0));
+    // WIDE allows −100 %, but the effective tempo stops at 40 BPM.
+    engine.set_tempo_range(1, 100.0).unwrap();
+    let state = engine.set_tempo(1, -90.0).unwrap();
+    assert!((state.bpm.unwrap() - 40.0).abs() < 1e-9);
+    assert!((state.tempo_percent - (40.0 / 120.0 - 1.0) * 100.0).abs() < 1e-9);
+}
+
+#[test]
+fn pitch_bend_nudges_while_held() {
+    let engine = Engine::offline(RATE);
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+    // Paused: nothing to bend.
+    let state = engine.pitch_bend(1, BendDirection::Forward, true).unwrap();
+    assert_eq!(state.pitch_bend, None);
+    engine.play(1).unwrap();
+    let state = engine.pitch_bend(1, BendDirection::Forward, true).unwrap();
+    assert_eq!(state.pitch_bend, Some(BendDirection::Forward));
+    assert!((state.rate - (1.0 + crate::PITCH_BEND)).abs() < 1e-12);
+    assert_eq!(state.bpm, Some(120.0), "BPM shows the tempo, not the nudge");
+    render(&engine, 1.0);
+    assert_near(
+        engine.deck(1).unwrap().position_us,
+        us(1.0 + crate::PITCH_BEND),
+        0.5,
+        "bent second",
+    );
+    let state = engine.pitch_bend(1, BendDirection::Forward, false).unwrap();
+    assert_eq!(state.pitch_bend, None);
+    assert_eq!(state.rate, 1.0);
+    let state = engine.pitch_bend(1, BendDirection::Back, true).unwrap();
+    assert!((state.rate - (1.0 - crate::PITCH_BEND)).abs() < 1e-12);
+    engine.pitch_bend(1, BendDirection::Back, false).unwrap();
+}
+
+#[test]
+fn pitch_bending_a_beat_synced_deck_drops_to_bpm_sync() {
+    let engine = Engine::offline(RATE);
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+    click_deck(&engine, 2, 126.0, 0.1, vec![]);
+    engine.play(1).unwrap();
+    engine.sync(2, SyncMode::Beat).unwrap();
+    engine.play(2).unwrap();
+    render(&engine, 1.0);
+    let state = engine.pitch_bend(2, BendDirection::Forward, true).unwrap();
+    assert_eq!(state.sync_mode, SyncMode::Bpm);
+    render(&engine, 0.3);
+    engine.pitch_bend(2, BendDirection::Forward, false).unwrap();
+    // Tempo still matched, phase left where the nudge put it.
+    render(&engine, 2.0);
+    let s2 = engine.deck(2).unwrap();
+    assert!((s2.bpm.unwrap() - 120.0).abs() < 1e-9);
+    let err = phase_error_ms(&engine, (0.0, 120.0), (0.1, 126.0));
+    assert!(err > 5.0, "nudged out of phase: {err} ms");
+    // Toggling SYNC restores beat sync, which pulls it back into phase.
+    engine.sync(2, SyncMode::Off).unwrap();
+    assert_eq!(
+        engine.sync(2, SyncMode::Beat).unwrap().sync_mode,
+        SyncMode::Beat
+    );
+    render(&engine, 0.5);
+    let err = phase_error_ms(&engine, (0.0, 120.0), (0.1, 126.0));
+    assert!(err < 1.0, "back in phase: {err} ms");
+}
+
+#[test]
+fn bpm_sync_matches_tempo_only() {
+    let engine = Engine::offline(RATE);
+    click_deck(&engine, 1, 120.0, 0.0, vec![]);
+    click_deck(&engine, 2, 126.0, 0.1, vec![]);
+    engine.play(1).unwrap();
+    render(&engine, 0.13);
+    engine.sync(2, SyncMode::Bpm).unwrap();
+    let before = engine.play(2).unwrap();
+    render(&engine, 1.0);
+    let after = engine.deck(2).unwrap();
+    assert!((after.bpm.unwrap() - 120.0).abs() < 1e-9);
+    // No phase jump: it moved exactly at the matched rate.
+    let travelled = (after.position_us - before.position_us) as f64;
+    assert!((travelled - 1e6 * 120.0 / 126.0).abs() < 1.0, "{travelled}");
+}
+
+// Mixer extras -------------------------------------------------------------------
+
+#[test]
+fn band_kills_and_auto_gain() {
+    let engine = Engine::offline(RATE);
+    deck_one_only(&engine);
+    let source = tones(RATE, 20.0, &[(60.0, 0.2), (1000.0, 0.2), (10_000.0, 0.2)]);
+    let mut request = samples(RATE, source, None, vec![]);
+    request.auto_gain_db = Some(-6.0);
+    engine.load(1, request).unwrap();
+    assert_eq!(engine.mixer().channels[0].auto_gain_db, -6.0);
+    engine.play(1).unwrap();
+    let levels = |engine: &Engine| {
+        render(engine, 0.3);
+        let out = left(&render(engine, 0.5));
+        [60.0, 1000.0, 10_000.0].map(|f| amplitude(&out, f, RATE))
+    };
+    let half = 0.2 * 10f64.powf(-6.0 / 20.0);
+    let [low, mid, high] = levels(&engine);
+    for level in [low, mid, high] {
+        assert!((level - half).abs() < 1e-3, "auto gain −6 dB: {level}");
+    }
+
+    // A kill is independent of the EQ gain, which comes back on release.
+    let set = |update: MixerSettingsUpdate| engine.set_mixer(update).unwrap();
+    set(MixerSettingsUpdate {
+        deck: Some(1),
+        eq_low: Some(3.0),
+        auto_gain_db: Some(0.0),
+        ..Default::default()
+    });
+    let state = set(MixerSettingsUpdate {
+        deck: Some(1),
+        kill_low: Some(true),
+        kill_high: Some(true),
+        ..Default::default()
+    });
+    assert!(state.channels[0].kill_low && state.channels[0].kill_high);
+    assert!(!state.channels[0].kill_mid);
+    assert_eq!(state.channels[0].eq_low, 3.0);
+    let [low, mid, high] = levels(&engine);
+    assert!(db(low / 0.2) < -40.0, "low killed: {} dB", db(low / 0.2));
+    assert!(db(high / 0.2) < -40.0, "high killed: {} dB", db(high / 0.2));
+    assert!(db(mid / 0.2).abs() < 1.0);
+    set(MixerSettingsUpdate {
+        deck: Some(1),
+        kill_low: Some(false),
+        kill_high: Some(false),
+        ..Default::default()
+    });
+    let [low, _, high] = levels(&engine);
+    assert!(
+        (db(low / 0.2) - 3.0).abs() < 0.5,
+        "EQ back: {} dB",
+        db(low / 0.2)
+    );
+    assert!(db(high / 0.2).abs() < 1.0);
+    // Channel settings need a deck; auto gain is clamped.
+    assert!(matches!(
+        engine.set_mixer(MixerSettingsUpdate {
+            kill_mid: Some(true),
+            ..Default::default()
+        }),
+        Err(Error::InvalidInput(_))
+    ));
+    let state = set(MixerSettingsUpdate {
+        deck: Some(1),
+        auto_gain_db: Some(99.0),
+        ..Default::default()
+    });
+    assert_eq!(state.channels[0].auto_gain_db, crate::AUTO_GAIN_MAX_DB);
+}
+
 // Events -----------------------------------------------------------------------
 
 fn deck_events(events: &[EngineEvent], deck: u8) -> Vec<&crate::DeckEvent> {
     events
         .iter()
         .filter_map(|e| match e {
-            EngineEvent::Deck(d) if d.state.deck == deck => Some(d),
+            EngineEvent::Deck(d) if d.state.deck == deck => Some(&**d),
             _ => None,
         })
         .collect()
@@ -1292,12 +1644,16 @@ fn render_path_does_not_allocate() {
             )),
             grid: crate::grid::Grid::from_beats(&grid(0.0, 124.0, 40).beats).map(Box::new),
             hot_cues: [None; crate::deck::HOT_CUES],
-            cue: 0.0,
+            memory_cues: [None; crate::deck::MEMORY_CUES],
+            gain_db: -3.0,
         }
     };
     let controls = vec![
         Control::Play(0),
-        Control::Sync { deck: 1, on: true },
+        Control::Sync {
+            deck: 1,
+            mode: SyncMode::Beat,
+        },
         Control::Play(1),
         Control::Mixer(crate::core::MixerUpdate {
             deck: Some(0),
@@ -1326,6 +1682,29 @@ fn render_path_does_not_allocate() {
             deck: 1,
             seconds: 12.34,
         },
+        Control::PitchBend {
+            deck: 1,
+            direction: 1,
+            press: true,
+        },
+        Control::PitchBend {
+            deck: 1,
+            direction: 1,
+            press: false,
+        },
+        Control::LoopIn(1),
+        Control::LoopOut(1),
+        Control::LoopResize {
+            deck: 1,
+            double: true,
+        },
+        Control::LoopExit(1),
+        Control::Reloop(1),
+        Control::MemoryCue {
+            deck: 0,
+            target: crate::deck::MemoryTarget::Next,
+        },
+        Control::Quantize { deck: 0, on: false },
         Control::Load {
             deck: 1,
             track: replacement,
@@ -1339,7 +1718,7 @@ fn render_path_does_not_allocate() {
     // Interleave queued commands with rendering, as the audio thread sees them.
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     let mut sound = false;
-    for block in 0..400 {
+    for block in 0..600 {
         if block % 20 == 0
             && let Some(control) = controls.next()
         {
@@ -1360,6 +1739,7 @@ fn render_path_does_not_allocate() {
     drop(core);
     let state = engine.deck(1).unwrap();
     assert!(state.playing && state.active_loop.is_some());
+    assert_eq!(engine.mixer().channels[1].auto_gain_db, -3.0);
 }
 
 // Real device -------------------------------------------------------------------
@@ -1374,7 +1754,7 @@ fn opens_the_default_device_silently() {
     let engine = Engine::start().unwrap();
     let returned = started.elapsed();
     // The first command waits for the device to open.
-    engine.set_quantize(true).unwrap();
+    engine.set_hot_cue_gate(false).unwrap();
     let output = engine.output().unwrap();
     eprintln!(
         "start returned in {:.2} ms, device ready after {:.1} ms: {output:?}",
@@ -1386,12 +1766,12 @@ fn opens_the_default_device_silently() {
     let after = engine.deck(1).unwrap().at_ms;
     assert!(after > before + 100.0, "clock moves: {before} → {after}");
     let started = std::time::Instant::now();
-    let status = engine.set_quantize(false).unwrap();
+    let status = engine.set_hot_cue_gate(true).unwrap();
     eprintln!(
         "command round trip: {:.2} ms, latency {:.2} ms",
         started.elapsed().as_secs_f64() * 1000.0,
         engine.output().unwrap().latency_ms
     );
-    assert!(status.running && !status.quantize);
+    assert!(status.running && status.hot_cue_gate);
     drop(engine);
 }

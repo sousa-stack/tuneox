@@ -25,9 +25,10 @@ _Last updated: 2026-10-12_
 
 **Audio engine** (`tuneox-audio`; spec part C: [specs/decks.md](specs/decks.md))
 - Two decks and a mixer for testing transitions (rekordbox's DUAL PLAYER): symphonia decoding of MP3, M4A (AAC-LC/ALAC), FLAC, WAV and AIFF into 16-bit stereo in memory (~10.6 MB per minute), playable while it decodes; all 113 files in the maintainers' test folder decode, at 1,000–4,000× real time.
-- CDJ-style CUE, hot cues, seek, beat jump, auto beat loops (sample-accurate wraps), tempo ±6/10/16/100 % with cubic resampling (vinyl mode), beat sync with master handling and phase lock, quantize, isolator EQ with kill, channel faders, crossfader, master volume.
+- Transport, tempo and sync follow rekordbox 7's EXPORT-mode players (research part A): CUE, hot cues that jump and play (gate mode optional), memory cue calls, auto beat loops and manual loops with reloop/resize (sample-accurate wraps), beat jump, per-deck quantize, tempo ±6/10/16/100 % within 40–499 BPM with typed BPM and reset, pitch bend, beat/BPM sync with master handover and locked slave tempo; cubic resampling (vinyl mode).
+- Mixer: the DUAL PLAYER's per-band kills, auto gain and crossfader, plus channel faders, isolator EQ and master volume as extras.
 - cpal output on its own thread (follows the default device; runs silently on a timer without one), real-time-safe core (a counting allocator test proves the render path doesn't allocate), offline engine for tests.
-- Commands: `deck_load`, `deck_play`, `deck_pause`, `deck_cue`, `deck_hot_cue`, `deck_seek`, `deck_beat_jump`, `deck_loop`, `deck_loop_exit`, `deck_set_tempo`, `deck_set_tempo_range`, `deck_sync`, `deck_set_master`, `player_set_quantize`, `mixer_set`, `player_status` (new effect class `playback`). The desktop app starts the engine at launch and forwards `tuneox://deck` / `tuneox://mixer` events.
+- Commands (new effect class `playback`): `deck_load`, `deck_play`, `deck_pause`, `deck_cue`, `deck_hot_cue`, `deck_memory_cue`, `deck_seek`, `deck_beat_jump`, `deck_loop`, `deck_loop_in`, `deck_loop_out`, `deck_reloop`, `deck_loop_resize`, `deck_loop_exit`, `deck_set_tempo`, `deck_set_bpm`, `deck_tempo_reset`, `deck_set_tempo_range`, `deck_pitch_bend`, `deck_sync`, `deck_set_master`, `deck_set_quantize`, `player_set_hot_cue_gate`, `mixer_set`, `player_status`. The desktop app starts the engine at launch and forwards `tuneox://deck` / `tuneox://mixer` events.
 
 **Desktop app**
 - Library view: Collection and playlist tree, virtualized track table (10k+ tracks), instant local search and sorting, Camelot keys, responsive columns, detail panel with cues and beat grid summary, first-run import with live progress.
@@ -39,7 +40,7 @@ _Last updated: 2026-10-12_
 ## In progress
 
 **Decks: waveforms, preview player and dual player** (spec: [specs/decks.md](specs/decks.md))
-- rekordbox research: dual player behavior, waveform styles and colors, sync/cue/quantize rules. Its findings settle the engine's "Behavior to confirm" list in the spec.
+- rekordbox research: dual player behavior, waveform styles and colors, sync/cue/quantize rules.
 - Waveform data: decode ANLZ waveform sections into TuneOx's waveform format; `get_waveform` command.
 - Then: deck UI in the desktop app (overview + scrolling detail waveforms, transport, tempo, sync, mixer) on the engine's commands and events.
 
@@ -56,8 +57,9 @@ _Last updated: 2026-10-12_
 - Smart playlists are imported with their rules but not evaluated.
 - Beat grids are stored per beat (~12 bytes/beat); a 10k-track library is ~106 MB. Can be packed much smaller without losing precision.
 - The desktop app and MCP server both open the library file directly; the planned "one process owns the library" socket isn't built yet.
-- Decks: no key lock / master tempo yet (pitch follows tempo; time-stretching is next, see the spec's "Later"), no headphone cue output, no slip mode, reverse, jog/nudge/pitch bend, memory cue CALL or reloop commands. Hot cues set from the pads live only in the engine until cue editing exists. No auto-cue to the first sound on load.
-- Decks: transport details follow CDJ conventions until rekordbox research confirms them (the spec's "Behavior to confirm"), including whether MP3 encoder delay should be trimmed.
+- Decks: no key lock / master tempo yet (pitch follows tempo; rekordbox defaults it off; time-stretching is next, see the spec's "Later"), no headphone cue output, slip, reverse or jog (rekordbox's EXPORT players have none either).
+- Decks: hot cues stored from the pads live only in the engine until cue editing exists; no memory cue set/delete, hot cue delete or automatic active loops yet. Track auto gain from rekordbox (`djmdMixerParam`) isn't imported yet; `deck_load` takes `auto_gain_db` meanwhile.
+- Decks: a few behaviors are still guesses (the spec's "Open behavior questions"): pitch bend amount, crossfader curve, some defaults, and whether MP3 encoder delay should be trimmed.
 - Decks: the output is always the default device (no device picker); AAC is LC only (symphonia has no HE-AAC); 24-bit sources are stored at 16 bits.
 - The desktop's `tuneox://deck` forwarding is built but hasn't been exercised in a running GUI yet.
 

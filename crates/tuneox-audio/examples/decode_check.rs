@@ -22,6 +22,7 @@ fn main() {
             cues: Vec::new(),
             bpm: None,
             duration_secs: None,
+            auto_gain_db: None,
         };
         let first = engine.load(1, request).expect("load");
         let state = engine

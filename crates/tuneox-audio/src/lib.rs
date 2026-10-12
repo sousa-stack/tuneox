@@ -36,13 +36,15 @@ mod state;
 #[cfg(test)]
 mod tests;
 
+pub use deck::{MAX_BPM, MAX_LOOP_BEATS, MIN_BPM, MIN_LOOP_BEATS, PITCH_BEND};
 pub use engine::{
-    Engine, LoadRequest, MixerSettingsUpdate, OFFLINE_SAMPLE_RATE, Source, TEMPO_RANGES,
+    Engine, LoadRequest, MemoryCueTarget, MixerSettingsUpdate, OFFLINE_SAMPLE_RATE, Source,
+    TEMPO_RANGES,
 };
-pub use mixer::{EQ_KILL_DB, EQ_MAX_DB};
+pub use mixer::{AUTO_GAIN_MAX_DB, AUTO_GAIN_MIN_DB, EQ_KILL_DB, EQ_MAX_DB};
 pub use state::{
-    ChannelState, DeckEvent, DeckState, EngineEvent, HotCueState, LoopState, MixerState,
-    OutputInfo, PlayerStatus,
+    BendDirection, ChannelState, DeckEvent, DeckState, EngineEvent, HotCueState, LoopState,
+    MemoryCueState, MixerState, OutputInfo, PlayerStatus, SyncMode,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +55,10 @@ pub enum Error {
     NoTrack(u8),
     #[error("the track on deck {0} has no beat grid or BPM")]
     NoBeatGrid(u8),
+    #[error(
+        "deck {deck} is synced to the master, deck {master}: change the tempo on deck {master} or turn sync off on deck {deck}"
+    )]
+    FollowsMaster { deck: u8, master: u8 },
     #[error("{0}")]
     InvalidInput(String),
     #[error("the audio engine is busy; try again")]

@@ -1,4 +1,4 @@
-//! One deck: the loaded track, transport (CDJ-style CUE, hot cues, loops,
+//! One deck: the loaded track, transport (CUE, hot cues, memory cues, loops,
 //! beat jump), tempo, and the resampling read head.
 //!
 //! Positions are seconds from the start of the track (`f64`, ~1e-12 s
@@ -8,16 +8,30 @@
 //! track rate → device rate and applies the tempo in one step. Pitch follows
 //! tempo (vinyl mode).
 //!
-//! Behavior that rekordbox research may change lives in small functions
-//! named after the situation (`cue_press_while_playing`, …) and is listed
-//! under "Behavior to confirm" in docs/specs/decks.md.
+//! Transport follows rekordbox 7's EXPORT-mode players as researched in
+//! research/rekordbox-decks.md §2. Each rule lives in a small function named
+//! after the situation (`cue_press_while_playing`, …) so a correction stays
+//! local; open points are listed in docs/specs/decks.md.
 
 use std::sync::Arc;
 
 use crate::grid::Grid;
 use crate::pcm::TrackPcm;
+pub use crate::state::SyncMode;
 
 pub const HOT_CUES: usize = 8;
+/// Memory cues a deck keeps (rekordbox allows 10 per track).
+pub const MEMORY_CUES: usize = 32;
+/// Auto beat loop and loop resize limits, in beats.
+pub const MIN_LOOP_BEATS: f64 = 1.0 / 64.0;
+pub const MAX_LOOP_BEATS: f64 = 512.0;
+/// Effective tempo limits.
+pub const MIN_BPM: f64 = 40.0;
+pub const MAX_BPM: f64 = 499.0;
+/// Speed change while a pitch bend button is held. rekordbox nudges through
+/// its jog-ring speed (`setJogRingSpeed(±0.1)`), whose percent is unknown;
+/// 4 % is a clearly audible but controllable nudge.
+pub const PITCH_BEND: f64 = 0.04;
 
 /// Positions closer than this are the same position (e.g. "at the cue").
 const SAME_POSITION: f64 = 0.001;
@@ -26,10 +40,10 @@ pub(crate) const FADE: u32 = 128;
 /// A nanosecond: far below a sample, far above `f64` rounding of positions.
 const WRAP_EPSILON: f64 = 1e-9;
 
+/// A stored cue point; with an end it's a loop.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HotCue {
     pub start: f64,
-    /// End of a hot loop.
     pub end: Option<f64>,
 }
 
@@ -37,9 +51,20 @@ pub struct HotCue {
 pub struct Loop {
     pub start: f64,
     pub end: f64,
+    /// Length in beats for loops made from a beat count (auto beat loops,
+    /// resized loops), so pressing the same size again can exit.
+    pub beats: Option<f64>,
 }
 
 impl Loop {
+    fn new(start: f64, end: f64) -> Self {
+        Self {
+            start,
+            end,
+            beats: None,
+        }
+    }
+
     fn len(&self) -> f64 {
         self.end - self.start
     }
@@ -49,8 +74,17 @@ impl Loop {
     }
 }
 
-/// CUE or a hot cue held while the deck was paused: plays until released,
-/// then returns.
+/// Which memory cue to call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryTarget {
+    /// 0 = the earliest.
+    Index(usize),
+    Next,
+    Previous,
+}
+
+/// CUE (or a hot cue in gate mode) held while the deck was paused: plays
+/// until released, then returns.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Preview {
     return_to: f64,
@@ -77,7 +111,10 @@ pub(crate) struct LoadedTrack {
     pub pcm: Arc<TrackPcm>,
     pub grid: Option<Box<Grid>>,
     pub hot_cues: [Option<HotCue>; HOT_CUES],
-    pub cue: f64,
+    /// Sorted by position.
+    pub memory_cues: [Option<HotCue>; MEMORY_CUES],
+    /// Auto gain for the track's mixer channel.
+    pub gain_db: f32,
 }
 
 pub(crate) struct Deck {
@@ -88,15 +125,24 @@ pub(crate) struct Deck {
     pub pos: f64,
     pub play_latched: bool,
     preview: Option<Preview>,
-    pub cue: f64,
+    /// None until set: a freshly loaded deck has no cue.
+    pub cue: Option<f64>,
     pub hot_cues: [Option<HotCue>; HOT_CUES],
+    pub memory_cues: [Option<HotCue>; MEMORY_CUES],
     pub active_loop: Option<Loop>,
+    /// The most recent loop, the target of RELOOP.
+    pub last_loop: Option<Loop>,
+    /// Loop in set with IN, waiting for OUT.
+    pub loop_in: Option<f64>,
     pub at_end: bool,
 
     pub tempo_percent: f64,
     pub tempo_range: f64,
-    pub sync: bool,
-    /// Tempo factor without sync's phase correction.
+    pub sync: SyncMode,
+    pub quantize: bool,
+    /// −1 while bending back, +1 forward.
+    pub bend: i8,
+    /// Tempo factor without sync's phase correction or a pitch bend.
     pub nominal_rate: f64,
     /// Tempo factor the read head moves at.
     pub rate: f64,
@@ -121,13 +167,18 @@ impl Default for Deck {
             pos: 0.0,
             play_latched: false,
             preview: None,
-            cue: 0.0,
+            cue: None,
             hot_cues: [None; HOT_CUES],
+            memory_cues: [None; MEMORY_CUES],
             active_loop: None,
+            last_loop: None,
+            loop_in: None,
             at_end: false,
             tempo_percent: 0.0,
             tempo_range: 10.0,
-            sync: false,
+            sync: SyncMode::Off,
+            quantize: true,
+            bend: 0,
             nominal_rate: 1.0,
             rate: 1.0,
             jumps: 0,
@@ -159,21 +210,35 @@ impl Deck {
         self.grid.as_ref().map(|g| g.bpm_at(self.pos))
     }
 
-    /// Replaces the track. Returns the old one so the caller can free it off
-    /// the audio thread.
+    /// Length of a loop in beats, if it can be measured.
+    pub fn loop_beats(&self, lp: &Loop) -> Option<f64> {
+        lp.beats.or_else(|| {
+            self.grid
+                .as_ref()
+                .map(|g| g.beat_at(lp.end) - g.beat_at(lp.start))
+        })
+    }
+
+    /// Replaces the track and parks at 0:00 with no cue and no loop (EXPORT
+    /// mode doesn't jump to the first memory cue). Returns the old track so
+    /// the caller can free it off the audio thread.
     pub fn load(&mut self, track: LoadedTrack) -> (Option<Arc<TrackPcm>>, Option<Box<Grid>>) {
         let old = (self.pcm.take(), self.grid.take());
         self.load_id = track.load_id;
         self.pcm = Some(track.pcm);
         self.grid = track.grid;
         self.hot_cues = track.hot_cues;
-        self.cue = track.cue;
-        self.pos = track.cue;
+        self.memory_cues = track.memory_cues;
+        self.cue = None;
+        self.pos = 0.0;
         self.play_latched = false;
         self.preview = None;
         self.active_loop = None;
+        self.last_loop = None;
+        self.loop_in = None;
         self.at_end = false;
         self.stalled = false;
+        self.bend = 0;
         // The old track's audio is about to be freed: cut it rather than fade.
         self.tail = None;
         self.audible = false;
@@ -186,7 +251,7 @@ impl Deck {
 
     pub fn play(&mut self) {
         if self.preview.take().is_some() {
-            // PLAY while holding CUE/hot cue: keep playing after release.
+            // PLAY while holding CUE: keep playing after release.
             self.play_latched = true;
             return;
         }
@@ -205,32 +270,33 @@ impl Deck {
         self.preview = None;
     }
 
-    pub fn cue_press(&mut self, quantize: bool) {
+    pub fn cue_press(&mut self) {
         if self.play_latched {
             self.cue_press_while_playing();
         } else if self.preview.is_none() {
-            self.cue_press_while_paused(quantize);
+            self.cue_press_while_paused();
         }
     }
 
-    /// CDJ "back cue": return to the cue point and pause.
+    /// Back cue: return to the cue point (the start if none is set) and
+    /// pause.
     fn cue_press_while_playing(&mut self) {
-        self.stop_moving();
-        self.play_latched = false;
-        let cue = self.cue;
-        self.jump_to(cue);
+        self.pause();
+        self.jump_to(self.cue.unwrap_or(0.0));
     }
 
     /// Paused at the cue point: play while held (cue point sampler).
-    /// Paused elsewhere: set the cue point here (snapped to the nearest beat
-    /// with quantize) and move to it.
-    fn cue_press_while_paused(&mut self, quantize: bool) {
-        if (self.pos - self.cue).abs() < SAME_POSITION {
-            self.start_preview(self.cue, Button::Cue);
-        } else {
-            let cue = self.snap(self.pos, quantize);
-            self.cue = cue;
-            self.jump_to(cue);
+    /// Paused elsewhere: the cue point moves here (snapped with quantize).
+    fn cue_press_while_paused(&mut self) {
+        match self.cue {
+            Some(cue) if (self.pos - cue).abs() < SAME_POSITION => {
+                self.start_preview(cue, Button::Cue);
+            }
+            _ => {
+                let cue = self.snap(self.pos);
+                self.cue = Some(cue);
+                self.jump_to(cue);
+            }
         }
     }
 
@@ -238,30 +304,41 @@ impl Deck {
         self.end_preview(Button::Cue);
     }
 
-    pub fn hot_cue_press(&mut self, slot: usize, quantize: bool) {
+    /// A hot cue pad. `gate`: the "Gate playback during Pause" preference.
+    pub fn hot_cue_press(&mut self, slot: usize, gate: bool) {
         let Some(hot_cue) = self.hot_cues.get(slot).copied() else {
             return;
         };
         match hot_cue {
-            None => self.hot_cue_set(slot, quantize),
-            Some(hot_cue) if self.play_latched => {
-                self.hot_cue_press_while_playing(hot_cue, quantize)
+            None => self.hot_cue_store(slot),
+            Some(hot_cue) if self.play_latched => self.hot_cue_press_while_playing(hot_cue),
+            Some(hot_cue) if gate && hot_cue.end.is_none() => {
+                self.hot_cue_press_gated(slot, hot_cue)
             }
-            Some(hot_cue) => self.hot_cue_press_while_paused(slot, hot_cue),
+            Some(hot_cue) => self.hot_cue_press_while_paused(hot_cue),
         }
     }
 
-    /// An empty pad stores the current position (snapped with quantize).
-    fn hot_cue_set(&mut self, slot: usize, quantize: bool) {
-        let start = self.snap(self.pos, quantize);
-        self.hot_cues[slot] = Some(HotCue { start, end: None });
+    /// An empty pad stores the current position (snapped with quantize), or
+    /// the loop that's playing as a hot loop.
+    fn hot_cue_store(&mut self, slot: usize) {
+        self.hot_cues[slot] = Some(match self.active_loop.filter(|lp| lp.contains(self.pos)) {
+            Some(lp) => HotCue {
+                start: lp.start,
+                end: Some(lp.end),
+            },
+            None => HotCue {
+                start: self.snap(self.pos),
+                end: None,
+            },
+        });
     }
 
     /// Jump and keep playing. With quantize the jump keeps the beat phase:
     /// landing as far before/after the hot cue as the read head was from its
     /// nearest beat, so a synced or beatmatched deck stays in time.
-    fn hot_cue_press_while_playing(&mut self, hot_cue: HotCue, quantize: bool) {
-        let mut target = match (&self.grid, quantize) {
+    fn hot_cue_press_while_playing(&mut self, hot_cue: HotCue) {
+        let mut target = match (&self.grid, self.quantize) {
             (Some(grid), true) => {
                 let offset = crate::grid::wrap_phase(grid.beat_at(self.pos));
                 grid.shift(hot_cue.start, offset)
@@ -279,20 +356,28 @@ impl Deck {
         self.jump_to(target);
     }
 
-    /// Paused: go to the hot cue and play while the pad is held; release
-    /// returns to it and pauses.
-    fn hot_cue_press_while_paused(&mut self, slot: usize, hot_cue: HotCue) {
+    /// Paused: jump and play (rekordbox's default).
+    fn hot_cue_press_while_paused(&mut self, hot_cue: HotCue) {
         self.activate_hot_loop(hot_cue);
+        self.jump_to(hot_cue.start);
+        if !self.moving() {
+            self.start_moving();
+        }
+        // Pressed while CUE was held: the hot cue takes over and latches.
+        self.preview = None;
+        self.play_latched = true;
+    }
+
+    /// Paused with gate mode on: play only while held, then return and
+    /// pause.
+    fn hot_cue_press_gated(&mut self, slot: usize, hot_cue: HotCue) {
         self.jump_to(hot_cue.start);
         self.start_preview(hot_cue.start, Button::HotCue(slot));
     }
 
     fn activate_hot_loop(&mut self, hot_cue: HotCue) {
         if let Some(end) = hot_cue.end.filter(|&end| end > hot_cue.start) {
-            self.active_loop = Some(Loop {
-                start: hot_cue.start,
-                end,
-            });
+            self.set_loop(Loop::new(hot_cue.start, end));
         }
     }
 
@@ -300,58 +385,169 @@ impl Deck {
         self.end_preview(Button::HotCue(slot));
     }
 
+    /// Jumps to a memory cue and pauses there; it becomes the cue point. A
+    /// memory loop is armed, so PLAY loops it.
+    pub fn memory_cue_call(&mut self, target: MemoryTarget) {
+        let cues = self.memory_cues.iter().flatten();
+        let found = match target {
+            MemoryTarget::Index(i) => cues.copied().nth(i),
+            MemoryTarget::Next => cues.copied().find(|c| c.start > self.pos + SAME_POSITION),
+            MemoryTarget::Previous => cues
+                .copied()
+                .rev()
+                .find(|c| c.start < self.pos - SAME_POSITION),
+        };
+        let Some(cue) = found else { return };
+        self.pause();
+        self.cue = Some(cue.start);
+        match cue.end.filter(|&end| end > cue.start) {
+            Some(end) => {
+                self.set_loop(Loop::new(cue.start, end));
+                self.jump_to(cue.start);
+            }
+            None => self.jump_to(cue.start),
+        }
+    }
+
     pub fn seek(&mut self, t: f64) {
         self.jump_to(t);
     }
 
-    /// Moves by `beats` on the grid, keeping the phase. Inside an active
-    /// loop the loop moves with the read head (CDJ-3000 loop move).
+    /// Moves by `beats` on the grid, keeping the phase. During a loop the
+    /// loop moves with the read head.
     pub fn beat_jump(&mut self, beats: f64) {
         let Some(grid) = &self.grid else { return };
         let target = grid.shift(self.pos, beats);
         if let Some(lp) = self.active_loop.filter(|lp| lp.contains(self.pos)) {
-            let start = grid.shift(lp.start, beats);
-            let end = grid.shift(lp.end, beats);
-            self.active_loop = (start >= 0.0).then_some(Loop { start, end });
+            let moved = Loop {
+                start: grid.shift(lp.start, beats),
+                end: grid.shift(lp.end, beats),
+                beats: lp.beats,
+            };
+            if moved.start >= 0.0 {
+                self.set_loop(moved);
+            } else {
+                self.active_loop = None;
+            }
         }
         self.jump_to(target);
     }
 
-    /// Auto beat loop of `beats` from the nearest beat (with quantize) or
-    /// from here. With a loop already active it's resized from its start.
-    pub fn beat_loop(&mut self, beats: f64, quantize: bool) {
+    /// Auto beat loop: `beats` from the current position (snapped to the
+    /// beat with quantize). The same size again exits; another size resizes
+    /// the active loop from its start.
+    pub fn beat_loop(&mut self, beats: f64) {
         let Some(grid) = &self.grid else { return };
-        let start = match self.active_loop {
-            Some(lp) => lp.start,
-            None => {
-                if quantize {
-                    grid.nearest_beat(self.pos)
-                } else {
-                    self.pos
-                }
-            }
-        };
-        let end = grid.shift(start, beats);
-        if end <= start {
+        if let Some(lp) = self.active_loop
+            && lp.beats.is_some_and(|b| (b - beats).abs() < 1e-9)
+        {
+            self.loop_exit();
             return;
         }
-        let lp = Loop { start, end };
-        self.active_loop = Some(lp);
-        if self.pos >= end {
-            // Past the new end (e.g. a shorter loop): wrap into it in phase.
-            let wrapped = start + (self.pos - start).rem_euclid(lp.len());
-            self.jump_to(wrapped);
+        let start = match self.active_loop {
+            Some(lp) => lp.start,
+            None => self.snap(self.pos),
+        };
+        let end = grid.shift(start, beats);
+        if end > start {
+            self.set_loop_and_wrap(Loop {
+                start,
+                end,
+                beats: Some(beats),
+            });
         }
     }
 
+    /// Manual loop IN: sets loop-in here (snapped with quantize) and, like
+    /// rekordbox's real-time cue, the cue point.
+    pub fn loop_in(&mut self) {
+        let t = self.snap(self.pos);
+        self.active_loop = None;
+        self.loop_in = Some(t);
+        self.cue = Some(t);
+    }
+
+    /// Manual loop OUT: loops from IN to here (snapped with quantize). With
+    /// a loop already playing it moves that loop's end here instead.
+    pub fn loop_out(&mut self) {
+        let start = match (self.loop_in, self.active_loop) {
+            (Some(start), _) => start,
+            (None, Some(lp)) => lp.start,
+            (None, None) => return,
+        };
+        let mut end = self.snap(self.pos);
+        if end <= start + SAME_POSITION {
+            // Quantize snapped OUT onto IN: make it a one-beat loop.
+            match &self.grid {
+                Some(grid) if self.quantize => end = grid.shift(start, 1.0),
+                _ => return,
+            }
+        }
+        self.loop_in = None;
+        self.set_loop_and_wrap(Loop::new(start, end));
+    }
+
+    /// RELOOP: back to the last loop's start, looping again.
+    pub fn reloop(&mut self) {
+        if let Some(lp) = self.last_loop {
+            self.set_loop(lp);
+            self.jump_to(lp.start);
+        }
+    }
+
+    /// Doubles or halves the active loop, anchored at loop-in, within
+    /// 1/64–512 beats (by time without a beat grid).
+    pub fn loop_resize(&mut self, double: bool) {
+        let Some(lp) = self.active_loop else { return };
+        let factor = if double { 2.0 } else { 0.5 };
+        let resized = match (&self.grid, self.loop_beats(&lp)) {
+            (Some(grid), Some(beats)) => {
+                let beats = (beats * factor).clamp(MIN_LOOP_BEATS, MAX_LOOP_BEATS);
+                Loop {
+                    start: lp.start,
+                    end: grid.shift(lp.start, beats),
+                    beats: Some(beats),
+                }
+            }
+            _ => Loop::new(lp.start, lp.start + lp.len() * factor),
+        };
+        if resized.end > resized.start {
+            self.set_loop_and_wrap(resized);
+        }
+    }
+
+    /// EXIT: playback runs on past loop-out. RELOOP can bring it back.
     pub fn loop_exit(&mut self) {
         self.active_loop = None;
     }
 
+    fn set_loop(&mut self, lp: Loop) {
+        self.active_loop = Some(lp);
+        self.last_loop = Some(lp);
+    }
+
+    /// Sets a loop and, if the read head is already past its end, wraps it
+    /// into the loop at the same phase.
+    fn set_loop_and_wrap(&mut self, lp: Loop) {
+        self.set_loop(lp);
+        if self.pos >= lp.end {
+            let wrapped = lp.start + (self.pos - lp.start).rem_euclid(lp.len());
+            self.jump_to(wrapped);
+        }
+    }
+
     // Tempo ---------------------------------------------------------------
 
+    /// Tempo fader in percent: clamped to the range, and so the effective
+    /// tempo stays within 40–499 BPM.
     pub fn set_tempo(&mut self, percent: f64) {
-        self.tempo_percent = percent.clamp(-self.tempo_range, self.tempo_range);
+        let mut percent = percent.clamp(-self.tempo_range, self.tempo_range);
+        if let Some(bpm) = self.original_bpm() {
+            let lo = (MIN_BPM / bpm - 1.0) * 100.0;
+            let hi = (MAX_BPM / bpm - 1.0) * 100.0;
+            percent = percent.clamp(lo, hi);
+        }
+        self.tempo_percent = percent;
     }
 
     /// Changes the fader range, keeping the tempo where it fits.
@@ -364,10 +560,34 @@ impl Deck {
         1.0 + self.tempo_percent / 100.0
     }
 
+    /// Pitch bend button. Only acts while playing; releasing either button
+    /// ends the bend. Returns true if a bend started.
+    pub fn pitch_bend(&mut self, direction: i8, press: bool) -> bool {
+        if press && self.moving() {
+            self.bend = direction.signum();
+            true
+        } else {
+            if !press {
+                self.bend = 0;
+            }
+            false
+        }
+    }
+
+    /// The pitch bend's speed factor right now.
+    pub fn bend_factor(&self) -> f64 {
+        if self.moving() {
+            1.0 + self.bend as f64 * PITCH_BEND
+        } else {
+            1.0
+        }
+    }
+
     // Helpers -------------------------------------------------------------
 
-    fn snap(&self, t: f64, quantize: bool) -> f64 {
-        match (&self.grid, quantize) {
+    /// Snaps to the nearest beat when quantize is on and there's a grid.
+    fn snap(&self, t: f64) -> f64 {
+        match (&self.grid, self.quantize) {
             (Some(grid), true) => grid.nearest_beat(t).max(0.0),
             _ => t,
         }

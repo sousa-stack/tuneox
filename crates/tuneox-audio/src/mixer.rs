@@ -17,6 +17,10 @@ const MID_HIGH_HZ: f64 = 2_500.0;
 pub const EQ_KILL_DB: f32 = -80.0;
 /// The most an EQ band can boost.
 pub const EQ_MAX_DB: f32 = 6.0;
+/// Auto gain range in dB. rekordbox's knob looks like ±10 dB, but stored
+/// track gains reach +14.4 dB.
+pub const AUTO_GAIN_MIN_DB: f32 = -24.0;
+pub const AUTO_GAIN_MAX_DB: f32 = 24.0;
 
 /// Samples over which gain changes are ramped, to avoid zipper noise.
 pub(crate) const RAMP: usize = 64;
@@ -26,6 +30,11 @@ pub(crate) struct ChannelSettings {
     pub volume: f32,
     /// low, mid, high in dB.
     pub eq_db: [f32; 3],
+    /// low, mid, high kill switches (rekordbox DUAL PLAYER's HIGH/MID/LOW),
+    /// independent of the EQ gains.
+    pub kill: [bool; 3],
+    /// Per-track loudness trim.
+    pub auto_gain_db: f32,
 }
 
 impl Default for ChannelSettings {
@@ -33,7 +42,22 @@ impl Default for ChannelSettings {
         Self {
             volume: 1.0,
             eq_db: [0.0; 3],
+            kill: [false; 3],
+            auto_gain_db: 0.0,
         }
+    }
+}
+
+impl ChannelSettings {
+    /// Linear gain of each band: the EQ, or 0 when killed.
+    fn band_gains(&self) -> [f32; 3] {
+        let mut gains = self.eq_db.map(eq_gain);
+        for (gain, kill) in gains.iter_mut().zip(self.kill) {
+            if kill {
+                *gain = 0.0;
+            }
+        }
+        gains
     }
 }
 
@@ -225,8 +249,9 @@ impl Mixer {
         for (d, (left, right)) in decks.into_iter().enumerate() {
             let settings = self.settings.channels[d];
             let channel = &mut self.channels[d];
-            let target_bands = settings.eq_db.map(eq_gain);
-            let target_gain = settings.volume.clamp(0.0, 1.0) * xf[d];
+            let target_bands = settings.band_gains();
+            let auto_gain = 10f32.powf(settings.auto_gain_db / 20.0);
+            let target_gain = settings.volume.clamp(0.0, 1.0) * xf[d] * auto_gain;
             let target_wet = if target_bands == [1.0; 3] { 0.0 } else { 1.0 };
             let start_bands = channel.bands;
             let start_gain = channel.gain;

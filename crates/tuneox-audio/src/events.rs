@@ -68,10 +68,10 @@ impl EventPump {
                     jumps,
                     at: now_ms,
                 });
-                events.push(EngineEvent::Deck(DeckEvent {
+                events.push(EngineEvent::Deck(Box::new(DeckEvent {
                     state,
                     sent_at_ms: now_ms,
-                }));
+                })));
             }
         }
         if self.mixer != Some(mixer) {

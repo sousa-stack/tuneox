@@ -10,15 +10,18 @@ use std::time::{Duration, Instant};
 use tuneox_core::{BeatGrid, Cue, TrackId};
 
 use crate::core::{Control, Core, Garbage, MixerUpdate, Snapshot};
-use crate::deck::{HOT_CUES, HotCue, LoadedTrack};
+use crate::deck::{
+    HOT_CUES, HotCue, LoadedTrack, Loop, MAX_BPM, MAX_LOOP_BEATS, MEMORY_CUES, MIN_BPM,
+    MIN_LOOP_BEATS, MemoryTarget,
+};
 use crate::events::EventPump;
 use crate::grid::Grid;
 use crate::mixer::MixerSettings;
 use crate::output::{self, OutputMessage};
 use crate::pcm::TrackPcm;
 use crate::state::{
-    ChannelState, DeckState, EngineEvent, HotCueState, LoopState, MixerState, OutputInfo,
-    PlayerStatus,
+    BendDirection, ChannelState, DeckState, EngineEvent, HotCueState, LoopState, MemoryCueState,
+    MixerState, OutputInfo, PlayerStatus, SyncMode,
 };
 use crate::{Error, Result};
 
@@ -55,13 +58,16 @@ pub struct LoadRequest {
     pub track_id: Option<TrackId>,
     pub source: Source,
     pub beat_grid: Option<BeatGrid>,
-    /// Hot cues load onto the pads; the first memory cue becomes the cue
-    /// point.
+    /// Hot cues load onto pads A–H; memory cues and loops can be called
+    /// with `memory_cue`.
     pub cues: Vec<Cue>,
     /// Used for a steady beat grid if the track has none.
     pub bpm: Option<f64>,
     /// Helps size decode storage for files that don't state their length.
     pub duration_secs: Option<f64>,
+    /// The track's auto gain (rekordbox analyses one per track); 0 dB if
+    /// `None`.
+    pub auto_gain_db: Option<f32>,
 }
 
 /// The audio engine: two decks and a mixer. Cheap to clone; every clone
@@ -184,8 +190,9 @@ impl Shared {
         state.at_ms = snapshot.at_ms;
         state.tempo_percent = s.tempo_percent;
         state.tempo_range = s.tempo_range;
-        state.sync = s.sync;
+        state.sync_mode = s.sync;
         state.master = s.master;
+        state.quantize = s.quantize;
         let Some(pcm) = meta.pcm.as_ref() else {
             return state;
         };
@@ -203,11 +210,31 @@ impl Shared {
         state.rate = s.rate;
         state.bpm = s.bpm;
         state.original_bpm = s.original_bpm;
-        state.cue_us = us(s.cue);
-        state.active_loop = s.active_loop.map(|lp| LoopState {
+        state.pitch_bend = match s.bend {
+            b if b < 0 => Some(BendDirection::Back),
+            b if b > 0 => Some(BendDirection::Forward),
+            _ => None,
+        };
+        state.cue_us = s.cue.map(us);
+        let loop_state = |lp: Loop, beats: Option<f64>| LoopState {
             start_us: us(lp.start),
             end_us: us(lp.end),
-        });
+            beats,
+        };
+        state.active_loop = s.active_loop.map(|lp| loop_state(lp, s.active_loop_beats));
+        state.last_loop = s.last_loop.map(|lp| loop_state(lp, s.last_loop_beats));
+        state.loop_in_us = s.loop_in.map(us);
+        state.memory_cues = s
+            .memory_cues
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, cue)| MemoryCueState {
+                index: index as u8,
+                start_us: us(cue.start),
+                end_us: cue.end.map(us),
+            })
+            .collect();
         state.hot_cues = s
             .hot_cues
             .iter()
@@ -233,6 +260,10 @@ pub(crate) fn mixer_state(settings: &MixerSettings) -> MixerState {
             eq_low: c.eq_db[0],
             eq_mid: c.eq_db[1],
             eq_high: c.eq_db[2],
+            kill_low: c.kill[0],
+            kill_mid: c.kill[1],
+            kill_high: c.kill[2],
+            auto_gain_db: c.auto_gain_db,
         }
     };
     MixerState {
@@ -416,7 +447,7 @@ impl Engine {
                 shared.deck_state(&snapshot, 1),
             ],
             mixer: mixer_state(&snapshot.mixer),
-            quantize: snapshot.quantize,
+            hot_cue_gate: snapshot.hot_cue_gate,
             output: self.output(),
         }
     }
@@ -425,10 +456,11 @@ impl Engine {
         mixer_state(&MixerSettings::default())
     }
 
-    /// Loads a track onto a deck. Returns at once; the track decodes in the
-    /// background (`loading` in the state) and can play as soon as audio is
-    /// available. Loading the track that's on the other deck reuses its
-    /// decoded audio.
+    /// Loads a track onto a deck, parked at 0:00 with no cue and no loop.
+    /// Returns at once; the track decodes in the background (`loading` in
+    /// the state) and can play as soon as audio is available. Loading the
+    /// track that's on the other deck reuses its decoded audio. If the
+    /// deck was sync master, master passes to the other deck.
     pub fn load(&self, deck: u8, request: LoadRequest) -> Result<DeckState> {
         let index = Self::deck_index(deck)?;
         let shared = &self.inner.shared;
@@ -437,21 +469,7 @@ impl Engine {
             .as_ref()
             .and_then(|g| Grid::from_beats(&g.beats))
             .or_else(|| request.bpm.and_then(|bpm| Grid::constant(0.0, bpm)));
-        let mut hot_cues = [None; HOT_CUES];
-        let mut cue: Option<f64> = None;
-        for c in &request.cues {
-            let start = c.start_us.max(0) as f64 / 1e6;
-            match c.hot_cue {
-                Some(slot) if (slot as usize) < HOT_CUES => {
-                    hot_cues[slot as usize] = Some(HotCue {
-                        start,
-                        end: c.end_us.map(|e| e as f64 / 1e6).filter(|&e| e > start),
-                    });
-                }
-                Some(_) => {}
-                None => cue = Some(cue.map_or(start, |c| c.min(start))),
-            }
-        }
+        let (hot_cues, memory_cues) = cue_tables(&request.cues);
 
         let (pcm, load_id) = {
             let mut decks = lock(&shared.decks);
@@ -502,7 +520,8 @@ impl Engine {
                 pcm,
                 grid: grid.map(Box::new),
                 hot_cues,
-                cue: cue.unwrap_or(0.0),
+                memory_cues,
+                gain_db: request.auto_gain_db.unwrap_or(0.0),
             },
         })?;
         self.deck(deck)
@@ -524,87 +543,168 @@ impl Engine {
         }
     }
 
-    pub fn play(&self, deck: u8) -> Result<DeckState> {
+    /// Sends a command for a deck that has a track and returns its state.
+    fn on_track(&self, deck: u8, control: impl FnOnce(usize) -> Control) -> Result<DeckState> {
         let index = self.require_track(deck)?;
-        self.send(Control::Play(index))?;
+        self.send(control(index))?;
         self.deck(deck)
+    }
+
+    /// Sends a command for a deck whose track has a beat grid (or BPM).
+    fn on_grid(&self, deck: u8, control: impl FnOnce(usize) -> Control) -> Result<DeckState> {
+        let index = self.require_grid(deck)?;
+        self.send(control(index))?;
+        self.deck(deck)
+    }
+
+    pub fn play(&self, deck: u8) -> Result<DeckState> {
+        self.on_track(deck, Control::Play)
     }
 
     pub fn pause(&self, deck: u8) -> Result<DeckState> {
-        let index = self.require_track(deck)?;
-        self.send(Control::Pause(index))?;
-        self.deck(deck)
+        self.on_track(deck, Control::Pause)
     }
 
-    /// The CUE button (CDJ behavior): see docs/specs/decks.md.
+    /// The CUE button: see docs/specs/decks.md.
     pub fn cue(&self, deck: u8, press: bool) -> Result<DeckState> {
-        let index = self.require_track(deck)?;
-        self.send(Control::Cue { deck: index, press })?;
-        self.deck(deck)
+        self.on_track(deck, |deck| Control::Cue { deck, press })
     }
 
     /// Hot cue pad `slot` (0 = A … 7 = H).
     pub fn hot_cue(&self, deck: u8, slot: u8, press: bool) -> Result<DeckState> {
-        let index = self.require_track(deck)?;
         if slot as usize >= HOT_CUES {
             return Err(Error::InvalidInput(format!(
                 "hot cue slot must be 0–7 (A–H), not {slot}"
             )));
         }
-        self.send(Control::HotCue {
-            deck: index,
-            slot: slot as usize,
-            press,
-        })?;
-        self.deck(deck)
+        let slot = slot as usize;
+        self.on_track(deck, |deck| Control::HotCue { deck, slot, press })
+    }
+
+    /// Calls a memory cue or loop: jump there and pause.
+    pub fn memory_cue(&self, deck: u8, target: MemoryCueTarget) -> Result<DeckState> {
+        let index = self.require_track(deck)?;
+        if let MemoryCueTarget::Index(i) = target {
+            let count = self.inner.shared.snapshot().decks[index]
+                .memory_cues
+                .iter()
+                .flatten()
+                .count();
+            if i as usize >= count {
+                return Err(Error::InvalidInput(format!(
+                    "deck {deck}'s track has {count} memory cues; there's no index {i}"
+                )));
+            }
+        }
+        let target = match target {
+            MemoryCueTarget::Index(i) => MemoryTarget::Index(i as usize),
+            MemoryCueTarget::Next => MemoryTarget::Next,
+            MemoryCueTarget::Previous => MemoryTarget::Previous,
+        };
+        self.on_track(deck, |deck| Control::MemoryCue { deck, target })
     }
 
     pub fn seek(&self, deck: u8, position_us: i64) -> Result<DeckState> {
-        let index = self.require_track(deck)?;
-        self.send(Control::Seek {
-            deck: index,
-            seconds: position_us.max(0) as f64 / 1e6,
-        })?;
-        self.deck(deck)
+        let seconds = position_us.max(0) as f64 / 1e6;
+        self.on_track(deck, |deck| Control::Seek { deck, seconds })
     }
 
     pub fn beat_jump(&self, deck: u8, beats: f64) -> Result<DeckState> {
-        let index = self.require_grid(deck)?;
         if !beats.is_finite() {
             return Err(Error::InvalidInput("beats must be a number".into()));
         }
-        self.send(Control::BeatJump { deck: index, beats })?;
-        self.deck(deck)
+        self.on_grid(deck, |deck| Control::BeatJump { deck, beats })
     }
 
-    /// Auto beat loop of `beats` beats.
+    /// Auto beat loop of `beats` beats (1/64–512); the same size again
+    /// exits the loop.
     pub fn beat_loop(&self, deck: u8, beats: f64) -> Result<DeckState> {
-        let index = self.require_grid(deck)?;
-        if !(beats.is_finite() && beats > 0.0) {
-            return Err(Error::InvalidInput("loop length must be positive".into()));
+        if !(MIN_LOOP_BEATS..=MAX_LOOP_BEATS).contains(&beats) {
+            return Err(Error::InvalidInput(
+                "loop length must be 1/64 to 512 beats".into(),
+            ));
         }
-        self.send(Control::BeatLoop { deck: index, beats })?;
-        self.deck(deck)
+        self.on_grid(deck, |deck| Control::BeatLoop { deck, beats })
+    }
+
+    pub fn loop_in(&self, deck: u8) -> Result<DeckState> {
+        self.on_track(deck, Control::LoopIn)
+    }
+
+    pub fn loop_out(&self, deck: u8) -> Result<DeckState> {
+        self.on_track(deck, Control::LoopOut)
+    }
+
+    pub fn reloop(&self, deck: u8) -> Result<DeckState> {
+        self.on_track(deck, Control::Reloop)
+    }
+
+    /// Doubles or halves the active loop, anchored at loop-in.
+    pub fn loop_resize(&self, deck: u8, double: bool) -> Result<DeckState> {
+        self.on_track(deck, |deck| Control::LoopResize { deck, double })
     }
 
     pub fn loop_exit(&self, deck: u8) -> Result<DeckState> {
-        let index = self.require_track(deck)?;
-        self.send(Control::LoopExit(index))?;
-        self.deck(deck)
+        self.on_track(deck, Control::LoopExit)
     }
 
-    /// Tempo fader in percent, clamped to the deck's range. Ignored while
-    /// the deck follows a sync master.
+    /// Refuses tempo changes on a deck that follows the sync master.
+    fn check_tempo_is_free(&self, deck: u8, index: usize) -> Result<()> {
+        let snapshot = self.inner.shared.snapshot();
+        if snapshot.decks[index].following {
+            return Err(Error::FollowsMaster {
+                deck,
+                master: if index == 0 { 2 } else { 1 },
+            });
+        }
+        Ok(())
+    }
+
+    /// Tempo in percent, clamped to the deck's range and to 40–499 BPM.
+    /// Refused while the deck follows a sync master.
     pub fn set_tempo(&self, deck: u8, percent: f64) -> Result<DeckState> {
         let index = Self::deck_index(deck)?;
         if !percent.is_finite() {
             return Err(Error::InvalidInput("tempo must be a number".into()));
+        }
+        self.check_tempo_is_free(deck, index)?;
+        self.send(Control::SetTempo {
+            deck: index,
+            percent,
+        })?;
+        self.deck(deck)
+    }
+
+    /// Sets the tempo by BPM, like typing it into rekordbox's BPM field. It
+    /// must be within 40–499 BPM and reachable within the tempo range.
+    pub fn set_bpm(&self, deck: u8, bpm: f64) -> Result<DeckState> {
+        let index = self.require_grid(deck)?;
+        self.check_tempo_is_free(deck, index)?;
+        if !(MIN_BPM..=MAX_BPM).contains(&bpm) {
+            return Err(Error::InvalidInput(format!(
+                "BPM must be between {MIN_BPM} and {MAX_BPM}"
+            )));
+        }
+        let state = self.deck(deck)?;
+        let original = state.original_bpm.ok_or(Error::NoBeatGrid(deck))?;
+        let percent = (bpm / original - 1.0) * 100.0;
+        if percent.abs() > state.tempo_range + 1e-9 {
+            return Err(Error::InvalidInput(format!(
+                "{bpm:.2} BPM is {percent:+.2} % from the track's {original:.2} BPM, outside the ±{} % tempo range",
+                state.tempo_range
+            )));
         }
         self.send(Control::SetTempo {
             deck: index,
             percent,
         })?;
         self.deck(deck)
+    }
+
+    /// Back to the track's own tempo (0 %). Refused while following a
+    /// sync master.
+    pub fn tempo_reset(&self, deck: u8) -> Result<DeckState> {
+        self.set_tempo(deck, 0.0)
     }
 
     /// Tempo fader range: 6, 10, 16 or 100 (WIDE) percent.
@@ -619,41 +719,71 @@ impl Engine {
         self.deck(deck)
     }
 
-    pub fn sync(&self, deck: u8, on: bool) -> Result<DeckState> {
-        let index = if on {
-            self.require_grid(deck)?
-        } else {
-            Self::deck_index(deck)?
+    /// Pitch bend: speeds the deck up (`forward`) or slows it down by
+    /// [`PITCH_BEND`] while pressed, playing only. On a beat-synced deck it
+    /// drops sync to BPM only until sync is turned off and on again.
+    pub fn pitch_bend(&self, deck: u8, direction: BendDirection, press: bool) -> Result<DeckState> {
+        let direction = match direction {
+            BendDirection::Back => -1,
+            BendDirection::Forward => 1,
         };
-        self.send(Control::Sync { deck: index, on })?;
+        self.on_track(deck, |deck| Control::PitchBend {
+            deck,
+            direction,
+            press,
+        })
+    }
+
+    /// Sync on (`Beat`: tempo and phase, or `Bpm`: tempo only) or `Off`.
+    pub fn sync(&self, deck: u8, mode: SyncMode) -> Result<DeckState> {
+        let index = if mode == SyncMode::Off {
+            Self::deck_index(deck)?
+        } else {
+            self.require_grid(deck)?
+        };
+        self.send(Control::Sync { deck: index, mode })?;
         self.deck(deck)
     }
 
     pub fn set_master(&self, deck: u8) -> Result<DeckState> {
-        let index = self.require_track(deck)?;
-        self.send(Control::SetMaster(index))?;
+        self.on_track(deck, Control::SetMaster)
+    }
+
+    /// Quantize for one deck.
+    pub fn set_quantize(&self, deck: u8, on: bool) -> Result<DeckState> {
+        let index = Self::deck_index(deck)?;
+        self.send(Control::Quantize { deck: index, on })?;
         self.deck(deck)
     }
 
-    pub fn set_quantize(&self, on: bool) -> Result<PlayerStatus> {
-        self.send(Control::Quantize(on))?;
+    /// "Gate playback during Pause" for hot cues, both decks.
+    pub fn set_hot_cue_gate(&self, on: bool) -> Result<PlayerStatus> {
+        self.send(Control::HotCueGate(on))?;
         Ok(self.status())
     }
 
-    /// Changes mixer settings. `deck` (1 or 2) is required with `volume`
-    /// or EQ changes.
+    /// Changes mixer settings. `deck` (1 or 2) is required with channel
+    /// settings (volume, EQ, kills, auto gain).
     pub fn set_mixer(&self, update: MixerSettingsUpdate) -> Result<MixerState> {
         let deck = match update.deck {
             Some(deck) => Some(Self::deck_index(deck)?),
             None => None,
         };
-        let per_deck = update.volume.is_some()
-            || [update.eq_low, update.eq_mid, update.eq_high]
+        let per_deck = [
+            update.volume,
+            update.eq_low,
+            update.eq_mid,
+            update.eq_high,
+            update.auto_gain_db,
+        ]
+        .iter()
+        .any(Option::is_some)
+            || [update.kill_low, update.kill_mid, update.kill_high]
                 .iter()
                 .any(Option::is_some);
         if per_deck && deck.is_none() {
             return Err(Error::InvalidInput(
-                "say which deck the volume or EQ is for".into(),
+                "say which deck (1 or 2) the channel settings are for".into(),
             ));
         }
         let finite = [
@@ -661,6 +791,7 @@ impl Engine {
             update.eq_low,
             update.eq_mid,
             update.eq_high,
+            update.auto_gain_db,
             update.crossfader,
             update.master_volume,
         ];
@@ -671,6 +802,8 @@ impl Engine {
             deck,
             volume: update.volume,
             eq: [update.eq_low, update.eq_mid, update.eq_high],
+            kill: [update.kill_low, update.kill_mid, update.kill_high],
+            auto_gain_db: update.auto_gain_db,
             crossfader: update.crossfader,
             master_volume: update.master_volume,
         }))?;
@@ -678,15 +811,56 @@ impl Engine {
     }
 }
 
+/// Hot cues by slot and memory cues in position order, from library cues.
+fn cue_tables(cues: &[Cue]) -> ([Option<HotCue>; HOT_CUES], [Option<HotCue>; MEMORY_CUES]) {
+    let to_cue = |c: &Cue| {
+        let start = c.start_us.max(0) as f64 / 1e6;
+        HotCue {
+            start,
+            end: c.end_us.map(|e| e as f64 / 1e6).filter(|&e| e > start),
+        }
+    };
+    let mut hot_cues = [None; HOT_CUES];
+    let mut memory: Vec<HotCue> = Vec::new();
+    for c in cues {
+        match c.hot_cue {
+            Some(slot) if (slot as usize) < HOT_CUES => hot_cues[slot as usize] = Some(to_cue(c)),
+            Some(_) => {}
+            None => memory.push(to_cue(c)),
+        }
+    }
+    memory.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut memory_cues = [None; MEMORY_CUES];
+    for (slot, cue) in memory_cues.iter_mut().zip(memory) {
+        *slot = Some(cue);
+    }
+    (hot_cues, memory_cues)
+}
+
+/// Which memory cue to call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryCueTarget {
+    /// 0 = the earliest.
+    Index(u8),
+    /// The first one after the playhead.
+    Next,
+    /// The last one before the playhead.
+    Previous,
+}
+
 /// Mixer changes; `None` leaves a setting alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MixerSettingsUpdate {
-    /// 1 or 2, for `volume` and the EQ.
+    /// 1 or 2, for the channel settings below.
     pub deck: Option<u8>,
     pub volume: Option<f32>,
     pub eq_low: Option<f32>,
     pub eq_mid: Option<f32>,
     pub eq_high: Option<f32>,
+    pub kill_low: Option<bool>,
+    pub kill_mid: Option<bool>,
+    pub kill_high: Option<bool>,
+    pub auto_gain_db: Option<f32>,
     pub crossfader: Option<f32>,
     pub master_volume: Option<f32>,
 }
