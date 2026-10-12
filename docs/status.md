@@ -71,6 +71,7 @@ _Last updated: 2026-10-12_
 - Decks: a few behaviors are still guesses (the spec's "Open behavior questions"): pitch bend amount, crossfader curve, some defaults, and whether MP3 encoder delay should be trimmed.
 - Decks: the output is always the default device (no device picker); AAC is LC only (symphonia has no HE-AAC); 24-bit sources are stored at 16 bits.
 - Deck UI gaps (spec part D, "Not built"): key shift / KEY SYNC / MT, the MEMORY button, INFO tab, phrase bars, artwork, the Matching button. Dragging the enlarged waveform scrubs with repeated seeks, which is choppier to the ear than rekordbox's drag.
+- The deck UI was exercised against a stand-in for the engine in a browser, and its `player_status` call in the real window; playing decks in the real window (events, clock, frame cost at Retina resolution) still needs a hands-on check.
 
 ## Decision log
 
