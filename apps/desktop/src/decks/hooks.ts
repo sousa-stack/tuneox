@@ -50,7 +50,12 @@ export function useDeckEngine(): void {
     ];
     commands
       .status()
-      .then((status) => alive && store.applyStatus(status))
+      .then((status) => {
+        if (!alive) return;
+        store.applyStatus(status);
+        // Without a device the engine still runs, silently.
+        if (status.output?.error) toast(`No audio output: ${status.output.error}`);
+      })
       .catch(toast);
     const loaded: (number | null)[] = [null, null];
     const follow = (deck: DeckId) => {

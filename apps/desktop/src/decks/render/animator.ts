@@ -116,7 +116,7 @@ class Animator {
   }
 
   private start() {
-    if (!this.raf) this.raf = requestAnimationFrame(this.frame);
+    if (!this.raf) this.raf = requestAnimationFrame(this.tick);
   }
 
   private cuesFor(deck: DeckId): CueCache {
@@ -151,8 +151,14 @@ class Animator {
     return { state, position, wf: resolved.wf, message, grid: entry?.grid ?? null, hotCues: cues.hot, memoryCues: cues.memory };
   }
 
-  private frame = (now: number) => {
-    this.raf = requestAnimationFrame(this.frame);
+  private tick = (now: number) => {
+    this.raf = requestAnimationFrame(this.tick);
+    this.render(now);
+  };
+
+  /** Draws one frame for time `now` (a `performance.now()` value). */
+  render(now: number, force = false): void {
+    if (force) this.dirty = true;
     const started = performance.now();
     const engineMs = store.clock.engineNow(now);
     const s = settings.get();
@@ -212,7 +218,7 @@ class Animator {
         : "idle";
       this.stats = { work: 0, worst: 0, frames: 0, since: now, tiles: 0 };
     }
-  };
+  }
 }
 
 export const animator = new Animator();
