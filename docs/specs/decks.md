@@ -144,16 +144,31 @@ New effect class **`playback`**: controls audio, doesn't change the library. MCP
 
 ## D. Deck UI (after A–C)
 
-A rekordbox-style dual player above the library browser:
+Build the UI from [research/rekordbox-decks.md](../research/rekordbox-decks.md); its "Checklist → For the UI agent" is the acceptance list. Highlights:
 
-- Per deck: overview waveform (whole track, playhead, played part dimmed, cue and hot cue markers, click to seek), scrolling detail waveform (playhead fixed in the center, beat grid lines with bar downbeats emphasized, cue/hot cue/loop markers, zoom), track title/artist, elapsed/remaining time, effective BPM and key, tempo % with fader and range, SYNC and MASTER buttons, CUE and PLAY/PAUSE, hot cue pads A–H, beat jump, auto loop sizes.
-- Mixer strip: two channel faders with 3-band EQ knobs, crossfader, master volume.
-- Load a track from the browser by drag-and-drop onto a deck, a context menu, or keyboard shortcuts.
-- Waveform style setting (blue / RGB / 3-band) with rekordbox's colors from research A/B.
-- Rendering stays at 60 fps with both decks playing: draw from cached waveform data on a canvas, animate the playhead from the clock above, never wait on the core per frame.
+**Layout: rekordbox's DUAL PLAYER above the library browser.**
+- Deck A on top, deck B below. Per deck: track info row (artwork if any, title/artist, BPM with two decimals, key, remaining time large with tenths `-02:54.4`, elapsed grey), BEAT SYNC (accent blue; **yellow/orange when `sync_mode` is `bpm`**), MASTER, the overview waveform, and a function row (MEMORY, AT/MT loop mode with `< N >`, `− BPM +` with double-click to type, pitch bend ◄◄ ►►, RST, Q).
+- **The two scrolling detail waveforms sit stacked between the decks, as half-waveforms facing each other** (A grows up from its baseline, B grows down), sharing one center playhead line, with each deck's bar counter (`N.bBars`, accent blue) beside the playhead.
+- Left operation column per deck: beat jump `< >` with size dropdown (Fine, 4/8/16 beats, 8/16/32 bars; default 4 beats), CUE (#FFB937 ring), PLAY/PAUSE. DUAL CONTROL toggle between the decks: when on, PLAY, CUE and beat jump go to both decks (the UI sends the command to each).
+- Mixer column: per-deck A-GAIN knob with dB readout (from the track's `auto_gain_db`; apply at most ±12 dB), HIGH/MID/LOW **kill** pills (#1473EB outline when on), vertical crossfader (A top, B bottom; double-click centers). TuneOx extras, collapsed by default behind a "Mixer" toggle: channel faders and EQ knobs.
+- Right side per deck: MEMORY / HOT CUE list (click a hot cue = jump and play; click a memory cue = jump and pause).
+- Library browser below, as today. Load a track by dragging it onto a deck, a context menu ("Load to Deck A/B"), or keyboard.
+
+**Waveforms** (data from `get_waveform`; colors and rules in research §4–5 and `research/waveforms.md`):
+- Style setting BLUE / RGB / 3Band, **default 3Band**.
+- Overviews come from the 1200-column data: 3Band from `three_band` preview (stacked bars per §4.4), RGB and BLUE both from the `rgb` preview (`PWV4`; BLUE uses the 8-color overview table in §4.2). Minute ticks, hot cue letter squares above, memory cue triangles on top, current cue orange triangle bottom-left, playhead light while playing and red when paused, played part drawn dimmer, click to seek keeping play state.
+- Detail waveforms from the 150/s data, drawn per research §4.2–4.5: 3Band span layering with the overlap colors and the raised-cosine high band, BLUE/RGB color tables quantized as rekordbox does; black background, beat grid (downbeats white with red edge markers, other beats 30 % white, hidden past a 120 s span), hot cue flags, memory cue triangles, loop overlay (#FFA300 at 50 %), zoom −/RST/+.
+- Hot cue colors: `ColorTableIndex` > 0 → the 62-color palette; 0 → COLORFUL slot defaults (A #FF376F, B #45ACDB, C #7DC13D, D #AA72FF, E #30D26E, F #E0641B, G #305AFF, H #C3AF04; hot loops #FF8C00).
+- 60 fps with both decks playing: render waveform columns to cached canvases once per track/zoom, then each frame only blits with an offset and draws the playhead and markers. The playhead position comes from the clock (part C), never from a per-frame core call.
+
+**Keyboard:** rekordbox's EXPORT preset (research §6): plain keys for deck A, ⇧ for deck B (Space play/pause, C cue, ←/→ beat jump, 1–3 hot cues, I/O/R loops, 4–9 beat loops, F1 sync, F3 tempo reset, F4/F5 pitch bend, F6/F7 BPM −/+, T time mode). Keys must not fire while typing in the search box.
+
+**Browser preview player** (rekordbox's Preview column): a waveform thumbnail column; clicking it previews from that position and pauses any playing deck. Needs a preview voice in the engine (see "Later" if not built yet).
 
 ## Later
 
+- Browser preview voice in the engine (`preview_play` { track_id, position_us } / `preview_stop`), if part C doesn't include it.
+- Persisting cue edits (hot cues stored from the decks) to the library.
 - Key lock / master tempo (time-stretching; candidates: Rubber Band (GPL), Signalsmith Stretch (MIT)).
 - Headphone cue on a second output, effects, recording, controllers.
 - Own waveform generation for tracks without rekordbox analysis.
