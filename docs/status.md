@@ -12,12 +12,12 @@ _Last updated: 2026-10-12_
 - REA + Ghidra set up for reverse engineering rekordbox 7 (7.2.9 and 7.2.19 binaries studied).
 
 **rekordbox import** (`import_rekordbox`)
-- Reads rekordbox 6/7 `master.db` (SQLCipher) read-only from a temporary copy: tracks with full metadata, playlists and folders, smart playlists (rules stored, not evaluated), cues (memory, hot A–H, loops, colors, comments), beat grids from ANLZ `PQTZ`.
+- Reads rekordbox 6/7 `master.db` (SQLCipher) read-only from a temporary copy: tracks with full metadata and Auto Gain (`djmdMixerParam`), playlists and folders, smart playlists (rules stored, not evaluated), cues (memory, hot A–H, loops, colors, comments), beat grids from ANLZ `PQTZ`.
 - Re-imports update instead of duplicating; duplicate files merge (first entry wins); dry run supported.
 - Verified on a real 10,361-track library: every track, playlist and cue imports; cues and beat grids match what rekordbox 7.2.19 writes to a USB export. Import ~2.8 s, re-import ~1.2 s.
 
 **Library** (`tuneox-library`)
-- SQLite schema v1 with FTS5 search; search by text, BPM range, key and harmonic compatibility (Camelot neighbors).
+- SQLite schema v2 (migrations from older versions run on open) with FTS5 search; search by text, BPM range, key and harmonic compatibility (Camelot neighbors).
 
 **Commands, CLI and MCP**
 - Command registry: `library_summary`, `list_playlists`, `get_playlist`, `search_tracks`, `list_tracks`, `get_track`, `get_waveform`, `import_rekordbox`.
@@ -26,17 +26,21 @@ _Last updated: 2026-10-12_
 **Desktop app**
 - Library view: Collection and playlist tree, virtualized track table (10k+ tracks), instant local search and sorting, Camelot keys, responsive columns, detail panel with cues and beat grid summary, first-run import with live progress.
 
+**Waveform data** (`get_waveform`)
+- All six rekordbox waveforms (blue, RGB, 3-band × overview, detail) decode from ANLZ files on demand into `tuneox_core::Waveform` (~0.2 ms for a 5-minute detail waveform), with the 3-band gains (`PWVC`).
+
 **Research** (see `research/`)
 - `master.db` schema and field encodings, cue kinds (1–3, 5–9 = hot cues A–H; 4 = slotless loop exported as a memory loop), key notations, local ANLZ files carry no cues, `.3EX` = MessagePack audio embeddings.
+- Waveforms (`waveforms.md`): every ANLZ waveform layout; 3-band bytes are low/mid/high (Deep Symmetry has the order wrong); `PWVC` = 3-band gains; `PVDI` = vocal detection.
+- Decks (`rekordbox-decks.md`): rekordbox's DUAL PLAYER layout and controls, CUE/hot cue/memory cue/loop/quantize/beat jump rules, tempo and sync behavior, how each waveform style is drawn and colored, the 62-color hot cue palette and per-slot defaults, the EXPORT keyboard map.
 - USB formats: which players read Device Library vs OneLibrary; a fresh rekordbox 7.2.19 export dissected (cues live in ANLZ files; OneLibrary `cue` table is empty; `.DAT` holds hot cues A–C only).
 
 ## In progress
 
 **Decks: waveforms, preview player and dual player** (spec: [specs/decks.md](specs/decks.md))
-- rekordbox research: dual player behavior, waveform styles and colors, sync/cue/quantize rules.
-- Waveform data (**done**): all six rekordbox waveforms (blue, RGB, 3-band × preview, detail) decode from ANLZ files into `tuneox_core::Waveform`; `get_waveform` serves them (0.2 ms for a 5-minute track's detail). `PWVC` identified as the 3-band gains; 3-band bands are stored low, mid, high (Deep Symmetry has the order wrong). See [research/waveforms.md](../research/waveforms.md).
-- Audio engine (`tuneox-audio`): two decks, decoding, tempo, sync, crossfader; `deck_*` commands.
-- Then: deck UI in the desktop app (overview + scrolling detail waveforms, transport, tempo, sync, mixer).
+- rekordbox research (part A) and waveform data (part B) are done; see above.
+- Audio engine (`tuneox-audio`, part C): two decks, decoding, tempo, sync, quantize, loops, crossfader, band kills, Auto Gain; `deck_*` commands. Being built, with rekordbox's transport and sync rules from the research.
+- Next: deck UI (part D) in rekordbox's DUAL PLAYER layout: stacked facing detail waveforms with one playhead, overviews, transport, tempo, sync, crossfader and kills.
 
 ## Next
 
@@ -52,7 +56,9 @@ _Last updated: 2026-10-12_
 - Beat grids are stored per beat (~12 bytes/beat); a 10k-track library is ~106 MB. Can be packed much smaller without losing precision.
 - The desktop app and MCP server both open the library file directly; the planned "one process owns the library" socket isn't built yet.
 - Waveforms exist only for tracks rekordbox analyzed (we read its ANLZ files); our own waveform generation comes with our own analysis.
-- How rekordbox draws the RGB overview (`PWV4`'s six values) and whether its CDJ-style 3-band view re-applies the `PWVC` gains are still open; `get_waveform` passes the raw values and gains through so the renderer can follow the answer. `PVDI` (vocal detection) isn't decoded.
+- rekordbox's normal scrolling waveform is computed from the audio at load time; drawing ANLZ data gives the CDJ / MIX POINT LINK look. Matching the smoother desktop look needs our own waveform generation.
+- Remaining waveform/deck unknowns (exact RGB overview layering, played-portion dimming, crossfader curve, some defaults) are listed under "Open questions" in `research/rekordbox-decks.md` and `research/waveforms.md`. `PVDI` (vocal detection) isn't decoded.
+- Auto Gain values above about +15 dB occur only on short sound effects; playback should cap the gain it applies.
 
 ## Decision log
 
