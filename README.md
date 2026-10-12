@@ -1,0 +1,53 @@
+# TuneOx
+
+An open-source DJ library manager and rekordbox alternative.
+
+TuneOx imports your existing rekordbox library, analyzes your tracks, lets you prep cues and playlists, and exports USB drives that Pioneer DJ / AlphaTheta media players read natively.
+
+> Status: pre-alpha. Nothing to download yet.
+
+## Goals
+
+- **Works on every Pioneer player.** Exports write both device formats: the classic Device Library (`export.pdb`, `exportExt.pdb`, ANLZ analysis files) used by CDJ-900 through CDJ-3000 and XDJ units, and OneLibrary (`exportLibrary.db`) used by newer hardware.
+- **No lag.** Setting a cue, scrolling a waveform or searching the library responds on the next frame. Disk writes never block the UI.
+- **Faster than rekordbox.** Fast startup, instant search across 100k+ tracks, and analysis that uses every CPU core.
+- **Your library comes with you.** Import tracks, playlists, cues, beatgrids and analysis from an existing rekordbox install without re-analyzing.
+
+## Roadmap
+
+**Milestone 1: Library + USB export**
+- Import a rekordbox 6/7 library (`master.db`)
+- Collection, playlists, smart playlists, tags, search
+- Analysis: BPM and beatgrid, key, waveforms (preview, detail, 3-band color)
+- Cue editor: hot cues, memory cues, loops, colors, comments
+- Export to USB: Device Library and OneLibrary, incremental sync
+
+**Milestone 2: Performance mode**
+- Decks, mixer, sync, key lock, FX, sampler
+- Controller support (DDJ series and MIDI learn)
+- Recording
+
+**Milestone 3: Network**
+- Pro DJ Link: browse a TuneOx library from CDJs over Ethernet, link export
+
+## Stack
+
+- **Core (Rust):** audio engine, analysis, library database (SQLite), device export
+- **Desktop app (Tauri 2):** React + TypeScript UI with GPU-rendered waveforms
+
+See [docs/architecture.md](docs/architecture.md).
+
+## Prior art
+
+TuneOx stands on years of community reverse-engineering work:
+
+- [Deep Symmetry](https://github.com/Deep-Symmetry): crate-digger, beat-link and the [DJ Link ecosystem analysis](https://djl-analysis.deepsymmetry.org/)
+- [rekordcrate](https://github.com/holzhaus/rekordcrate): Rust parser for rekordbox device exports
+- [pyrekordbox](https://github.com/dylanljones/pyrekordbox): Python access to rekordbox databases, ANLZ files and OneLibrary
+- [Mixxx](https://github.com/mixxxdj/mixxx): the open-source DJ application
+
+## License
+
+[GPL-3.0](LICENSE)
+
+TuneOx is not affiliated with or endorsed by AlphaTheta Corporation or Pioneer DJ. rekordbox, CDJ, XDJ and Pioneer DJ are trademarks of their respective owners.

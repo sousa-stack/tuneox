@@ -1,0 +1,13 @@
+[package]
+name = "tuneox-pioneer"
+description = "Readers and writers for rekordbox and Pioneer DJ library formats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+thiserror.workspace = true

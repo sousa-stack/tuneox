@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Tauri
+/apps/desktop/src-tauri/target/
+/apps/desktop/src-tauri/gen/
+
+# Reverse-engineering workspace: raw REA/Ghidra output, decompiled code,
+# copies of rekordbox databases and real exports. Never commit any of it.
+/.re/
+
+# Local agent settings
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
