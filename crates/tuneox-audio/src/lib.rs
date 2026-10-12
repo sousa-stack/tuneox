@@ -37,6 +37,7 @@ mod state;
 mod tests;
 
 pub use deck::{MAX_BPM, MAX_LOOP_BEATS, MIN_BPM, MIN_LOOP_BEATS, PITCH_BEND};
+pub use decode::mp3_lead_in_frames;
 pub use engine::{
     Engine, LoadRequest, MemoryCueTarget, MixerSettingsUpdate, OFFLINE_SAMPLE_RATE, Source,
     TEMPO_RANGES,

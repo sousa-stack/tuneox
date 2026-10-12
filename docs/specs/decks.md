@@ -227,7 +227,7 @@ Each rule is one small function in `crates/tuneox-audio` (named in the right col
 | 3 | **Defaults**: quantize on, half/double sync always on, hot cue jumps immediate with phase kept (not "wait for next beat"); rekordbox's defaults weren't decoded (open question 7). | `Deck::default`, `Core::sync_target` |
 | 4 | **Memory cue call sets the cue point** to the called cue (CDJ convention); the research says jump and pause but not whether the cue moves. | `Deck::memory_cue_call` |
 | 5 | **Auto gain range** −24…+24 dB: rekordbox's knob looks like ±10 dB but stored gains reach +14.4 dB (open question 6). Imported track gains aren't applied yet: `deck_load` takes `auto_gain_db` until the library stores `djmdMixerParam` gains. | `mixer::AUTO_GAIN_*` |
-| 6 | **MP3 encoder delay** (LAME/Xing gapless info) is **not** trimmed, so the first decoded frame is time 0. If rekordbox trims it, every MP3 cue and grid would be ~25 ms off here: compare against a known grid. | `decode::TRIM_ENCODER_DELAY` |
+| 6 | **Resolved (2026-10-12):** rekordbox doesn't trim MP3 encoder delay, but it plays a non-FFmpeg Xing/Info header frame as one frame of silence. TuneOx now does the same (`mp3_lead_in_frames`), so all 40 MP3s measured line up with rekordbox's decode within a few ms. See [research/mp3-timing.md](../research/mp3-timing.md). | `decode::mp3_lead_in_frames` |
 | 7 | **Extras' details**: the channel fader and master volume are linear gain; the EQ is an isolator (Linkwitz-Riley 24 dB/oct, crossovers 250 Hz / 2.5 kHz). Not part of the DUAL PLAYER, so no rekordbox reference. | `Mixer::process`, `mixer::LOW_MID_HZ` |
 | 8 | **Track end**: the deck stops at the end; PLAY there does nothing until the deck is moved. | `Deck::render`, `Deck::play` |
 

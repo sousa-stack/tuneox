@@ -38,6 +38,7 @@ _Last updated: 2026-10-12_
 
 **Research** (see `research/`)
 - `master.db` schema and field encodings, cue kinds (1–3, 5–9 = hot cues A–H; 4 = slotless loop exported as a memory loop), key notations, local ANLZ files carry no cues, `.3EX` = MessagePack audio embeddings.
+- MP3 timing (`mp3-timing.md`): rekordbox plays a non-FFmpeg Xing/Info header frame as a frame of silence (26.1 ms) and doesn't trim encoder delay; TuneOx's decoder matches it, so imported cues and grids line up on MP3s (verified on 50 tracks against rekordbox's own waveforms).
 - Waveforms (`waveforms.md`): every ANLZ waveform layout; 3-band bytes are low/mid/high (Deep Symmetry has the order wrong); `PWVC` = 3-band gains; `PVDI` = vocal detection.
 - Decks (`rekordbox-decks.md`): rekordbox's DUAL PLAYER layout and controls, CUE/hot cue/memory cue/loop/quantize/beat jump rules, tempo and sync behavior, how each waveform style is drawn and colored, the 62-color hot cue palette and per-slot defaults, the EXPORT keyboard map.
 - USB formats: which players read Device Library vs OneLibrary; a fresh rekordbox 7.2.19 export dissected (cues live in ANLZ files; OneLibrary `cue` table is empty; `.DAT` holds hot cues A–C only).
@@ -67,7 +68,7 @@ _Last updated: 2026-10-12_
 - Auto Gain values above about +15 dB occur only on short sound effects; playback should cap the gain it applies.
 - Decks: no key lock / master tempo yet (pitch follows tempo; rekordbox defaults it off; time-stretching is next, see the spec's "Later"), no headphone cue output, slip, reverse or jog (rekordbox's EXPORT players have none either).
 - Decks: hot cues stored from the pads live only in the engine until cue editing exists; no memory cue set/delete, hot cue delete or automatic active loops yet.
-- Decks: a few behaviors are still guesses (the spec's "Open behavior questions"): pitch bend amount, crossfader curve, some defaults, and whether MP3 encoder delay should be trimmed.
+- Decks: a few behaviors are still guesses (the spec's "Open behavior questions"): pitch bend amount, crossfader curve, some defaults.
 - Decks: the output is always the default device (no device picker); AAC is LC only (symphonia has no HE-AAC); 24-bit sources are stored at 16 bits.
 - The desktop's `tuneox://deck` forwarding is built but hasn't been exercised in a running GUI yet.
 
