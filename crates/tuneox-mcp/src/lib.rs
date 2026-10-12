@@ -281,6 +281,10 @@ fn annotations(effect: Effect) -> Value {
             "readOnlyHint": false, "destructiveHint": false,
             "idempotentHint": false, "openWorldHint": false,
         }),
+        Effect::Playback => json!({
+            "readOnlyHint": false, "destructiveHint": false,
+            "idempotentHint": false, "openWorldHint": false,
+        }),
         Effect::Destructive | Effect::DeviceWrite => json!({
             "readOnlyHint": false, "destructiveHint": true,
             "idempotentHint": false, "openWorldHint": false,

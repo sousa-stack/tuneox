@@ -20,5 +20,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 serde_json.workspace = true
+tuneox-audio.workspace = true
 tuneox-commands.workspace = true
 tuneox-library.workspace = true
