@@ -1,7 +1,9 @@
 // The two enlarged waveforms, stacked and facing each other, with zoom
 // controls on the left edge. Click a lane to move that deck's playhead there;
 // drag to move it like a record (deck_scrub: the audio follows the drag, and
-// a playing deck plays on when let go).
+// a playing deck plays on when let go). A drag also ends if the canvas never
+// sees the pointer-up: a pointer-up anywhere in the window, lost pointer
+// capture, or the window losing focus lets go where the record was.
 
 import { useEffect, useRef } from "react";
 import * as act from "../../decks/actions";
@@ -28,6 +30,24 @@ export function DetailWaveforms() {
   const drag = useRef<Drag | null>(null);
   const settings = useSettings();
   useEffect(() => animator.attachDetail(canvas.current!), []);
+
+  /** Lets go of a drag (a click that never moved does nothing). */
+  const release = () => {
+    const d = drag.current;
+    drag.current = null;
+    if (d?.moved) act.scrubEnd(d.deck, d.targetUs);
+  };
+
+  useEffect(() => {
+    // Bubble phase: the canvas's own pointer-up runs first when it gets one.
+    window.addEventListener("pointerup", release);
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("pointerup", release);
+      window.removeEventListener("blur", release);
+      release();
+    };
+  }, []);
 
   const deckAt = (e: React.PointerEvent<HTMLCanvasElement>): DeckId => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -61,6 +81,7 @@ export function DetailWaveforms() {
         data-deck="split"
         onPointerDown={(e) => {
           if (e.button !== 0) return;
+          release();
           const deck = deckAt(e);
           if (act.deckState(deck).track_id == null) return;
           e.currentTarget.setPointerCapture(e.pointerId);
@@ -98,11 +119,8 @@ export function DetailWaveforms() {
           const offset = e.clientX - (rect.left + rect.width / 2);
           act.seekTo(d.deck, act.currentPosition(d.deck) + offset * usPerPixel(d.deck));
         }}
-        onPointerCancel={() => {
-          const d = drag.current;
-          drag.current = null;
-          if (d?.moved) act.scrubEnd(d.deck, d.targetUs);
-        }}
+        onPointerCancel={release}
+        onLostPointerCapture={release}
       />
     </div>
   );

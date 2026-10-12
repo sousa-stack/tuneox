@@ -66,6 +66,10 @@ const SCRUB_FULL_LEVEL_RATE: f64 = 0.25;
 const SCRUB_HANDOVER: f64 = 0.002;
 /// A released scrub on a paused deck stops once this close to its target.
 const SCRUB_SETTLED_SECONDS: f64 = 2e-5;
+/// A held scrub that hears no command for this long lets go by itself, so a
+/// lost pointer-up or a controller that went away can't leave the deck held.
+/// The UI re-sends its position while the pointer is down and still.
+pub(crate) const SCRUB_IDLE_RELEASE_SECONDS: f64 = 1.5;
 
 /// A stored cue point; with an end it's a loop.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -178,6 +182,8 @@ struct Scrub {
     /// The hand let go: hand over to playback (if PLAY is latched) or come
     /// to rest at the target.
     released: bool,
+    /// Output samples since the last scrub command.
+    idle: u32,
 }
 
 /// What a scrub command does.
@@ -714,7 +720,8 @@ impl Deck {
     /// hand on it (a playing deck slows to a stop unless dragged on);
     /// `Move` drags it to `target`; `End` lets go at `target`, after which
     /// it plays on if PLAY is latched or comes to rest. `Move` without a
-    /// `Start` starts; `End` without one does nothing.
+    /// `Start` starts; `End` without one does nothing. A held scrub with no
+    /// command for [`SCRUB_IDLE_RELEASE_SECONDS`] ends as if let go.
     pub fn scrub(&mut self, phase: ScrubPhase, target: Option<f64>) {
         let duration = self.duration();
         let clamp = |t: f64| {
@@ -729,12 +736,14 @@ impl Deck {
             (ScrubPhase::End, None) => return,
             (ScrubPhase::End, Some(scrub)) => {
                 scrub.released = true;
+                scrub.idle = 0;
                 if let Some(t) = target {
                     scrub.target = t;
                 }
             }
             (_, Some(scrub)) => {
                 scrub.released = false;
+                scrub.idle = 0;
                 if let Some(t) = target {
                     scrub.target = t;
                 }
@@ -750,6 +759,7 @@ impl Deck {
                     velocity: if moving { self.rate } else { 0.0 },
                     level: if moving { 1.0 } else { 0.0 },
                     released: false,
+                    idle: 0,
                 });
             }
         }
@@ -909,6 +919,14 @@ impl Deck {
             self.audible = false;
             return false;
         };
+        if let Some(scrub) = &mut self.scrub
+            && !scrub.released
+        {
+            scrub.idle = scrub.idle.saturating_add(left.len() as u32);
+            if scrub.idle as f64 > SCRUB_IDLE_RELEASE_SECONDS * device_rate {
+                scrub.released = true;
+            }
+        }
         let ended = self.render_track(&pcm, left, right, device_rate);
         self.pcm = Some(pcm);
         ended

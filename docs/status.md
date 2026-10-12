@@ -57,7 +57,7 @@ _Last updated: 2026-10-12_
 
 **Decks: waveforms, preview player and dual player** (spec: [specs/decks.md](specs/decks.md))
 - Parts A (research), B (waveform data), C (audio engine + deck commands) and D (deck UI) are done, with the follow-ups (cue editing, scrubbing, preview player, quantize resolution, bar sync); see above.
-- Next: hands-on QA of the follow-ups in the real window, then key lock / master tempo.
+- Next: key lock / master tempo.
 
 ## Next
 
@@ -82,8 +82,10 @@ _Last updated: 2026-10-12_
 - Decks: no automatic active loops, Smart Cue or cue colour/comment editing yet.
 - Decks: a few behaviors are still guesses (the spec's "Open behavior questions"): pitch bend amount, crossfader curve, some defaults, a deck starting stopping the preview, MEMORY's "just after loop play", the scrub feel constants.
 - Decks: the output is always the default device (no device picker); AAC is LC only (symphonia has no HE-AAC); 24-bit sources are stored at 16 bits.
-- Deck UI gaps (spec part D, "Not built"): key shift / KEY SYNC / MT, INFO tab, phrase bars, artwork, the Matching button, preview keys (⌘P, ⌘[) and cue markers on preview thumbnails. Scrubbing, the preview column and the cue editing controls were checked by tests and builds only; how the drag sounds and the preview column feels need a hands-on check in the real window.
-- Hands-on QA in the real window (2026-10-12, muted): loading by double-click and drag, facing 3-band/RGB/BLUE waveforms, beat sync alignment across the shared playhead, 60 fps at ~0.3 ms drawing per frame on Retina, overview seek, CUE set, hot cue jump-and-play, palette colors, kills, mixer extras and master handover all work. Open: whether beat sync should also align bars (TuneOx aligns beats only, like it understands Pioneer's beat sync to).
+- Deck UI gaps (spec part D, "Not built"): key shift / KEY SYNC / MT, INFO tab, phrase bars, artwork, the Matching button, preview keys (⌘P, ⌘[) and cue markers on preview thumbnails. How the scrub sounds hasn't been judged by ear yet.
+- Hands-on QA in the real window (2026-10-12, muted): loading by double-click and drag, facing 3-band/RGB/BLUE waveforms, beat sync alignment across the shared playhead, 60 fps at ~0.3 ms drawing per frame on Retina, overview seek, CUE set, hot cue jump-and-play, palette colors, kills, mixer extras and master handover all work. Bar sync was added since as an option.
+- Hands-on QA of the follow-ups (2026-10-12): the preview column and preview playback, bar sync, the quantize resolution, MEMORY (a quantized memory cue, saved to the library), ⌘3 deleting a hot cue (saved), A-GAIN trims (saved as the track's gain; double-click restores it), scrubbing a paused deck (rests where let go) and a playing one (plays on) all work. A scrub that looked stuck during QA (most likely a stale screenshot) showed that a lost pointer-up would have left the deck held; scrubs now also end on a pointer-up anywhere in the window, lost pointer capture or window blur, and the engine lets go after 1.5 s without a command. The ✕ on cue rows was `display: none` until hover, so automation couldn't reach it; it now fades in instead.
+- The track detail panel shows the gain from when the library loaded, so it lags after an A-GAIN trim until the next reload.
 
 ## Decision log
 
@@ -100,6 +102,7 @@ _Last updated: 2026-10-12_
 - **2026-10-12** A command that can write the library is `edit` even when it also plays (`deck_hot_cue`, `mixer_set`, the cue edit commands). The desktop routes engine commands by a separate `player` flag on each command (`Command::PLAYER`), not by effect class.
 - **2026-10-12** Cue edits made on a deck and A-GAIN trims save to the library at once, as rekordbox does; a trim becomes the track's `auto_gain_db` (rekordbox overwrites its gain the same way) rather than a separate column.
 - **2026-10-12** Bar sync (beat sync aligning downbeats) is a TuneOx extra beyond rekordbox, off by default.
+- **2026-10-12** A held scrub lets go by itself after 1.5 s without a command; the UI re-sends its position every 250 ms while the pointer is down. A lost pointer-up, a reloaded window or an agent that forgets `end` can't leave a deck held.
 
 ## Test setup the maintainers use
 

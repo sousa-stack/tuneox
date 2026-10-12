@@ -2043,6 +2043,40 @@ fn scrubbing_jumps_to_far_targets_and_ends_loops_it_leaves() {
     ));
 }
 
+#[test]
+fn a_held_scrub_lets_go_by_itself_when_nothing_is_heard() {
+    let idle = crate::deck::SCRUB_IDLE_RELEASE_SECONDS;
+    let engine = Engine::offline(RATE);
+    tone_deck(&engine);
+    engine.seek(1, 5_000_000).unwrap();
+    engine
+        .scrub(1, crate::ScrubAction::Move, Some(6_000_000))
+        .unwrap();
+    // Held still: the controller re-sends its position, so it stays held.
+    for _ in 0..(3.0 * idle / 0.25) as usize {
+        render(&engine, 0.25);
+        engine
+            .scrub(1, crate::ScrubAction::Move, Some(6_000_000))
+            .unwrap();
+    }
+    assert!(engine.deck(1).unwrap().scrubbing);
+    // The pointer-up got lost: it lets go and rests where it was dragged.
+    render(&engine, idle * 0.8);
+    assert!(engine.deck(1).unwrap().scrubbing, "not before the timeout");
+    render(&engine, idle * 0.4);
+    let state = engine.deck(1).unwrap();
+    assert!(!state.scrubbing && !state.playing);
+    assert_near(state.position_us, 6_000_000, 1.0, "at rest");
+
+    // A playing deck plays on.
+    engine.play(1).unwrap();
+    engine.scrub(1, crate::ScrubAction::Start, None).unwrap();
+    render(&engine, idle + 0.5);
+    let state = engine.deck(1).unwrap();
+    assert!(state.playing && !state.scrubbing);
+    assert_eq!(state.rate, 1.0);
+}
+
 // Preview player --------------------------------------------------------------------
 
 fn preview(samples: Vec<f32>, position_us: i64, gain: Option<f32>) -> crate::PreviewRequest {

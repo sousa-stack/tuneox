@@ -195,7 +195,12 @@ function pumpSeek(deck: DeckId) {
 // Dragging the enlarged waveform moves the deck like a record (deck_scrub).
 // The waveform follows the pointer exactly (a patch on the shown state); the
 // audio follows in the engine. Commands go one at a time and consecutive
-// moves collapse to the latest, so a fast drag never queues up.
+// moves collapse to the latest, so a fast drag never queues up. While the
+// pointer is down the position is re-sent every KEEP_ALIVE_MS: the engine lets
+// go of a scrub it hasn't heard from for 1.5 s, which keeps a lost pointer-up
+// from leaving the deck held.
+
+const KEEP_ALIVE_MS = 250;
 
 interface ScrubOp {
   action: "start" | "move" | "end";
@@ -209,11 +214,14 @@ interface Scrub {
   patch: number;
   /** Stops waiting for the engine to settle after a drag. */
   settle: (() => void) | null;
+  /** Where the hand holds the record, and the timer re-sending it. */
+  target: number;
+  keepAlive: ReturnType<typeof setInterval> | undefined;
 }
 
 const scrubs: [Scrub, Scrub] = [
-  { ops: [], busy: false, patch: 0, settle: null },
-  { ops: [], busy: false, patch: 0, settle: null },
+  { ops: [], busy: false, patch: 0, settle: null, target: 0, keepAlive: undefined },
+  { ops: [], busy: false, patch: 0, settle: null, target: 0, keepAlive: undefined },
 ];
 
 function showScrubPosition(deck: DeckId, positionUs: number, rate = 0) {
@@ -273,6 +281,12 @@ export function scrubStart(deck: DeckId): number {
   const position = currentPosition(deck);
   showScrubPosition(deck, position);
   queueScrub(deck, { action: "start", position });
+  s.target = position;
+  clearInterval(s.keepAlive);
+  s.keepAlive = setInterval(() => {
+    if (!loaded(deck)) clearInterval(s.keepAlive);
+    else if (s.ops.length === 0) queueScrub(deck, { action: "move", position: s.target });
+  }, KEEP_ALIVE_MS);
   return position;
 }
 
@@ -280,12 +294,16 @@ export function scrubMove(deck: DeckId, positionUs: number): void {
   const state = store.deck(deck);
   if (state.track_id == null) return;
   const target = Math.max(0, state.duration_us > 0 ? Math.min(positionUs, state.duration_us) : positionUs);
+  scrubs[deck - 1].target = target;
   showScrubPosition(deck, target);
   queueScrub(deck, { action: "move", position: target });
 }
 
 /** Pointer up: let go. A playing deck plays on from here; a paused one rests here. */
 export function scrubEnd(deck: DeckId, positionUs: number): void {
+  const s = scrubs[deck - 1];
+  clearInterval(s.keepAlive);
+  s.keepAlive = undefined;
   const state = store.deck(deck);
   if (state.track_id == null) return;
   const target = Math.max(0, state.duration_us > 0 ? Math.min(positionUs, state.duration_us) : positionUs);

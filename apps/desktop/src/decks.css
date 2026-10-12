@@ -878,12 +878,15 @@ canvas.detail {
   position: relative;
 }
 
-/* ✕ on a row, shown on hover (rekordbox's HOT CUE / MEMORY lists). */
+/* ✕ on a row, shown on hover (rekordbox's HOT CUE / MEMORY lists). Hidden
+   with opacity rather than display, so screen readers and automation can
+   still reach it; a mouse user sees it whenever the pointer is on the row. */
 .cue-delete {
   position: absolute;
   top: 50%;
   right: 4px;
-  display: none;
+  display: grid;
+  opacity: 0;
   place-items: center;
   width: 16px;
   height: 16px;
@@ -898,8 +901,9 @@ canvas.detail {
   cursor: default;
 }
 
-.cue-item:hover .cue-delete {
-  display: grid;
+.cue-item:hover .cue-delete,
+.cue-delete:focus-visible {
+  opacity: 1;
 }
 
 .cue-delete:hover {

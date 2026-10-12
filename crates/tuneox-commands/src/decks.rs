@@ -416,7 +416,7 @@ pub struct DeckScrubInput {
 
 impl Command for DeckScrub {
     const NAME: &'static str = "deck_scrub";
-    const DESCRIPTION: &'static str = "Scrubs a deck like a record moved by hand (dragging the enlarged waveform): \"start\" puts the hand on it (a playing deck slows to a stop unless dragged), \"move\" drags it to `position_us`, \"end\" lets go. The audio follows the drag smoothly at the speed it moves (backwards too) without per-move fades; on \"end\" the deck plays on from there if it was playing, otherwise it rests there paused. A \"move\" without a \"start\" starts one. `scrubbing` is true in the state meanwhile.";
+    const DESCRIPTION: &'static str = "Scrubs a deck like a record moved by hand (dragging the enlarged waveform): \"start\" puts the hand on it (a playing deck slows to a stop unless dragged), \"move\" drags it to `position_us`, \"end\" lets go. The audio follows the drag smoothly at the speed it moves (backwards too) without per-move fades; on \"end\" the deck plays on from there if it was playing, otherwise it rests there paused. A \"move\" without a \"start\" starts one. A held scrub that gets no command for 1.5 s lets go by itself, so re-send \"move\" to hold the record still longer. `scrubbing` is true in the state meanwhile.";
     const EFFECT: Effect = Effect::Playback;
     const PLAYER: bool = true;
     type Input = DeckScrubInput;
