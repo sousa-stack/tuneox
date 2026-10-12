@@ -49,7 +49,7 @@ _Last updated: 2026-10-12_
 **Decks: waveforms, preview player and dual player** (spec: [specs/decks.md](specs/decks.md))
 - Parts A (research), B (waveform data), C (audio engine + deck commands) and D (deck UI) are done; see above.
 - Being built now (one agent, full stack): cue colors/comments in deck state, saving cue edits and A-GAIN trims to the library (hot cue store/delete, memory cue set/delete), smooth scrubbing on the enlarged waveform, and the browser preview player (Preview column, pauses decks).
-- Then: hands-on QA of the decks in the real window (the screen was locked during the UI build), key lock (time-stretching).
+- Then: key lock (time-stretching).
 
 ## Next
 
@@ -73,7 +73,7 @@ _Last updated: 2026-10-12_
 - Decks: a few behaviors are still guesses (the spec's "Open behavior questions"): pitch bend amount, crossfader curve, some defaults.
 - Decks: the output is always the default device (no device picker); AAC is LC only (symphonia has no HE-AAC); 24-bit sources are stored at 16 bits.
 - Deck UI gaps (spec part D, "Not built"): key shift / KEY SYNC / MT, the MEMORY button, INFO tab, phrase bars, artwork, the Matching button. Dragging the enlarged waveform scrubs with repeated seeks, which is choppier to the ear than rekordbox's drag.
-- The deck UI was exercised against a stand-in for the engine in a browser, and its `player_status` call in the real window; playing decks in the real window (events, clock, frame cost at Retina resolution) still needs a hands-on check.
+- Hands-on QA in the real window (2026-10-12, muted): loading by double-click and drag, facing 3-band/RGB/BLUE waveforms, beat sync alignment across the shared playhead, 60 fps at ~0.3 ms drawing per frame on Retina, overview seek, CUE set, hot cue jump-and-play, palette colors, kills, mixer extras and master handover all work. Open: whether beat sync should also align bars (TuneOx aligns beats only, like it understands Pioneer's beat sync to).
 
 ## Decision log
 
