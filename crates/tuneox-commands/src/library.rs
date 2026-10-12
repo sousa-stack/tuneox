@@ -2,7 +2,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tuneox_core::{Cue, MusicalKey, Playlist, PlaylistId, Track, TrackId};
+use tuneox_core::{Beat, Cue, MusicalKey, Playlist, PlaylistId, Track, TrackId};
 use tuneox_library::SearchQuery;
 
 use crate::{Command, Context, Effect, Error, Result};
@@ -263,6 +263,43 @@ impl Command for GetPlaylist {
             playlist,
             track_ids,
             tracks,
+        })
+    }
+}
+
+pub struct GetBeatGrid;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetBeatGridInput {
+    pub track_id: TrackId,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GetBeatGridOutput {
+    pub track_id: TrackId,
+    /// Every beat in order. Empty if the track has no beat grid.
+    pub beats: Vec<Beat>,
+}
+
+impl Command for GetBeatGrid {
+    const NAME: &'static str = "get_beat_grid";
+    const DESCRIPTION: &'static str = "Every beat of a track's beat grid: time in microseconds, position in the bar (1 = downbeat) and tempo (BPM × 100). For drawing grid lines; get_track has a summary.";
+    const EFFECT: Effect = Effect::Read;
+    type Input = GetBeatGridInput;
+    type Output = GetBeatGridOutput;
+
+    fn run(ctx: &mut Context, input: GetBeatGridInput) -> Result<GetBeatGridOutput> {
+        if ctx.library.track(input.track_id)?.is_none() {
+            return Err(Error::NotFound(format!("track {}", input.track_id)));
+        }
+        Ok(GetBeatGridOutput {
+            track_id: input.track_id,
+            beats: ctx
+                .library
+                .beat_grid(input.track_id)?
+                .map(|grid| grid.beats)
+                .unwrap_or_default(),
         })
     }
 }

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
-use tuneox_audio::{Engine, EngineEvent};
+use tuneox_audio::{Engine, EngineEvent, MixerSettingsUpdate};
 use tuneox_commands::{Context, Effect};
 use tuneox_library::Library;
 
@@ -109,6 +109,14 @@ pub fn run() {
         .setup(move |app| {
             if let Some(engine) = &engine {
                 forward_events(app.handle(), engine);
+                // For testing without sound: TUNEOX_MUTED=1 starts with the
+                // master volume at 0.
+                if std::env::var_os("TUNEOX_MUTED").is_some_and(|v| v != "0") {
+                    let _ = engine.set_mixer(MixerSettingsUpdate {
+                        master_volume: Some(0.0),
+                        ..Default::default()
+                    });
+                }
             }
             Ok(())
         })

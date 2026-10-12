@@ -33,10 +33,10 @@ pub use decks::{
 };
 pub use import_rekordbox::{ImportCounts, ImportRekordbox, ImportRekordboxInput, ImportReport};
 pub use library::{
-    GetPlaylist, GetPlaylistInput, GetPlaylistOutput, GetTrack, GetTrackInput, GetTrackOutput,
-    GridSummary, LibrarySummary, LibrarySummaryOutput, ListPlaylists, ListPlaylistsOutput,
-    ListTracks, ListTracksInput, ListTracksOutput, NoInput, SearchTracks, SearchTracksInput,
-    SearchTracksOutput,
+    GetBeatGrid, GetBeatGridInput, GetBeatGridOutput, GetPlaylist, GetPlaylistInput,
+    GetPlaylistOutput, GetTrack, GetTrackInput, GetTrackOutput, GridSummary, LibrarySummary,
+    LibrarySummaryOutput, ListPlaylists, ListPlaylistsOutput, ListTracks, ListTracksInput,
+    ListTracksOutput, NoInput, SearchTracks, SearchTracksInput, SearchTracksOutput,
 };
 pub use waveform::{GetWaveform, GetWaveformInput, GetWaveformOutput};
 
@@ -222,6 +222,7 @@ registry![
     SearchTracks,
     ListTracks,
     GetTrack,
+    GetBeatGrid,
     GetWaveform,
     ImportRekordbox,
     DeckLoad,

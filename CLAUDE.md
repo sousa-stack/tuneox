@@ -58,6 +58,8 @@ cargo run -p tuneox-cli -- --library .re/test-library.db import-rekordbox --dry-
 cd apps/desktop && TUNEOX_LIBRARY=$PWD/../../.re/test-library.db bun run tauri dev
 ```
 
+Set `TUNEOX_MUTED=1` when launching the desktop app for testing: it starts with the master volume at 0, so pressing play makes no sound.
+
 Research tools:
 
 ```bash

@@ -252,6 +252,10 @@ Build the UI from [research/rekordbox-decks.md](../research/rekordbox-decks.md);
 - Hot cue colors: `ColorTableIndex` > 0 → the 62-color palette; 0 → COLORFUL slot defaults (A #FF376F, B #45ACDB, C #7DC13D, D #AA72FF, E #30D26E, F #E0641B, G #305AFF, H #C3AF04; hot loops #FF8C00).
 - 60 fps with both decks playing: render waveform columns to cached canvases once per track/zoom, then each frame only blits with an offset and draws the playhead and markers. The playhead position comes from the clock (part C), never from a per-frame core call.
 
+**Data the UI needs:** `get_waveform` (waveforms), `get_beat_grid` (every beat with its bar position, for grid lines and the bar counter), `get_track` (cues with colors and comments), `player_status` plus the `tuneox://deck` / `tuneox://mixer` events (live state and the clock), and the deck/mixer commands in part C. Engine-stored hot cues have no color yet; draw them with the scheme default for their slot.
+
+**Testing without sound:** start the app with `TUNEOX_MUTED=1` (master volume 0 at launch).
+
 **Keyboard:** rekordbox's EXPORT preset (research §6): plain keys for deck A, ⇧ for deck B (Space play/pause, C cue, ←/→ beat jump, 1–3 hot cues, I/O/R loops, 4–9 beat loops, F1 sync, F3 tempo reset, F4/F5 pitch bend, F6/F7 BPM −/+, T time mode). Keys must not fire while typing in the search box.
 
 **Browser preview player** (rekordbox's Preview column): a waveform thumbnail column; clicking it previews from that position and pauses any playing deck. Needs a preview voice in the engine (see "Later" if not built yet).

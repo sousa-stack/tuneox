@@ -20,7 +20,7 @@ _Last updated: 2026-10-12_
 - SQLite schema v2 (migrations from older versions run on open) with FTS5 search; search by text, BPM range, key and harmonic compatibility (Camelot neighbors).
 
 **Commands, CLI and MCP**
-- Command registry: `library_summary`, `list_playlists`, `get_playlist`, `search_tracks`, `list_tracks`, `get_track`, `get_waveform`, `import_rekordbox`.
+- Command registry: `library_summary`, `list_playlists`, `get_playlist`, `search_tracks`, `list_tracks`, `get_track`, `get_beat_grid`, `get_waveform`, `import_rekordbox`, plus the deck and mixer commands (see the audio engine above).
 - `tuneox` CLI over the registry; `tuneox mcp` serves them as MCP tools (protocol 2026-07-28 and legacy `initialize` clients), with progress notifications.
 
 **Audio engine** (`tuneox-audio`; spec part C: [specs/decks.md](specs/decks.md))
