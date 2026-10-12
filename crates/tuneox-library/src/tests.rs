@@ -245,6 +245,39 @@ fn query(text: &str) -> SearchQuery {
 }
 
 #[test]
+fn migrates_a_version_1_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    {
+        // A version 1 library: no auto_gain_db column.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(&include_str!("schema.sql").replace("    auto_gain_db  REAL,\n", ""))
+            .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO track (uuid, path, title, created_at, updated_at)
+             VALUES ('u', '/m/old.mp3', 'Old', 0, 0)",
+            [],
+        )
+        .unwrap();
+    }
+    let mut lib = Library::open(&path).unwrap();
+    let old = lib.search(&query("old")).unwrap().remove(0);
+    assert_eq!(old.info.auto_gain_db, None);
+    let import = lib.import("rekordbox", "db1").unwrap();
+    let gained = TrackInfo {
+        auto_gain_db: Some(-1.5),
+        ..track("/m/new.mp3", "New", "X", 120.0, "C")
+    };
+    let id = import.upsert_track("1", &gained, None).unwrap().id;
+    import.commit().unwrap();
+    assert_eq!(
+        lib.track(id).unwrap().unwrap().info.auto_gain_db,
+        Some(-1.5)
+    );
+}
+
+#[test]
 fn reopens_an_existing_library() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested/library.db");

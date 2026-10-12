@@ -43,6 +43,9 @@ pub struct TrackInfo {
     pub track_number: Option<u32>,
     /// `YYYY-MM-DD`.
     pub date_added: Option<String>,
+    /// Gain that brings the track to a common loudness during playback, in
+    /// dB (rekordbox's Auto Gain).
+    pub auto_gain_db: Option<f64>,
 }
 
 /// The eight track colors Pioneer DJ hardware and rekordbox support.

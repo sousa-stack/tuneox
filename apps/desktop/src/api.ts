@@ -39,6 +39,8 @@ export interface Track {
   year: number | null;
   track_number: number | null;
   date_added: string | null;
+  /** Playback gain for loudness matching, dB (rekordbox Auto Gain). */
+  auto_gain_db: number | null;
 }
 
 export type PlaylistKind = "folder" | "playlist" | "smart";

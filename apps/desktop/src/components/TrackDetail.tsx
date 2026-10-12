@@ -36,6 +36,7 @@ export function TrackDetail({ trackId }: { trackId: number | null }) {
     ["Label", track.label],
     ["Year", track.year],
     ["Plays", track.play_count || null],
+    ["Auto gain", track.auto_gain_db != null ? `${track.auto_gain_db >= 0 ? "+" : ""}${track.auto_gain_db.toFixed(1)} dB` : null],
     [
       "Format",
       [track.file_type?.toUpperCase(), track.bit_depth && `${track.bit_depth}-bit`, track.sample_rate && `${(track.sample_rate / 1000).toFixed(1)} kHz`]

@@ -113,7 +113,11 @@ impl MasterDb {
                     label.Name, remixer.Name, c.Commnt, key.ScaleName, c.BPM, c.Length,
                     c.Rating, c.ColorID, c.FileType, c.SampleRate, c.BitDepth, c.BitRate,
                     c.FileSize, c.DJPlayCount, c.ReleaseYear, c.TrackNo, c.StockDate,
-                    c.AnalysisDataPath
+                    c.AnalysisDataPath,
+                    (SELECT GainHigh FROM djmdMixerParam
+                     WHERE ContentID = c.ID AND rb_local_deleted = 0 LIMIT 1),
+                    (SELECT GainLow FROM djmdMixerParam
+                     WHERE ContentID = c.ID AND rb_local_deleted = 0 LIMIT 1)
              FROM djmdContent c
              LEFT JOIN djmdArtist artist ON artist.ID = c.ArtistID
              LEFT JOIN djmdAlbum album ON album.ID = c.AlbumID
@@ -149,6 +153,7 @@ impl MasterDb {
                 year: int(r, 20).filter(|&v| v > 0).map(|v| v as u16),
                 track_number: int(r, 21).filter(|&v| v > 0).map(|v| v as u32),
                 date_added: text(r, 22),
+                auto_gain_db: mixer_gain_db(int(r, 24), int(r, 25)),
                 path,
             };
             Ok(RbTrack {
@@ -261,6 +266,14 @@ pub fn is_known_cue_kind(kind: i64) -> bool {
     (0..=9).contains(&kind)
 }
 
+/// `djmdMixerParam.GainHigh`/`GainLow` hold the two 16-bit halves of a
+/// float32 linear gain (high half first). Returns it in dB.
+fn mixer_gain_db(high: Option<i64>, low: Option<i64>) -> Option<f64> {
+    let bits = ((high? as u32 & 0xffff) << 16) | (low? as u32 & 0xffff);
+    let gain = f32::from_bits(bits) as f64;
+    (gain.is_finite() && gain > 0.0).then(|| 20.0 * gain.log10())
+}
+
 fn track_color(id: i64) -> Option<TrackColor> {
     TrackColor::ALL
         .get(usize::try_from(id).ok()?.checked_sub(1)?)
@@ -325,6 +338,18 @@ mod tests {
         assert!(is_known_cue_kind(4));
         assert!(is_known_cue_kind(9));
         assert!(!is_known_cue_kind(10));
+    }
+
+    #[test]
+    fn decodes_mixer_gain() {
+        // 0.5 as float32 is 0x3F000000.
+        let db = mixer_gain_db(Some(0x3F00), Some(0)).unwrap();
+        assert!((db - -6.0206).abs() < 1e-3, "{db}");
+        // Bulletproof in the sample library: 0x3F58C124 ≈ 0.8467.
+        let db = mixer_gain_db(Some(16216), Some(49444)).unwrap();
+        assert!((db - -1.445).abs() < 1e-2, "{db}");
+        assert_eq!(mixer_gain_db(Some(0), Some(0)), None);
+        assert_eq!(mixer_gain_db(None, Some(1)), None);
     }
 
     #[test]

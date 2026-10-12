@@ -10,7 +10,14 @@ use tuneox_core::{
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// Upgrades from each older schema version: `MIGRATIONS[n]` takes a library
+/// from version n + 1 to n + 2. New libraries get `schema.sql` directly.
+const MIGRATIONS: &[&str] = &[
+    // 1 → 2: rekordbox Auto Gain.
+    "ALTER TABLE track ADD COLUMN auto_gain_db REAL;",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -94,6 +101,14 @@ impl Library {
                 tx.commit()?;
             }
             SCHEMA_VERSION => {}
+            older if older < SCHEMA_VERSION => {
+                let tx = conn.transaction()?;
+                for migration in &MIGRATIONS[older as usize - 1..] {
+                    tx.execute_batch(migration)?;
+                }
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                tx.commit()?;
+            }
             newer => return Err(Error::NewerSchema(newer)),
         }
         Ok(Self { conn })
@@ -340,7 +355,8 @@ impl Import<'_> {
                             color = ?14, file_type = ?15, sample_rate = ?16, bit_depth = ?17,
                             bitrate = ?18, file_size = ?19, play_count = ?20, year = ?21,
                             track_number = ?22, date_added = ?23,
-                            analysis_dir = coalesce(?24, analysis_dir), updated_at = ?25
+                            analysis_dir = coalesce(?24, analysis_dir), updated_at = ?25,
+                            auto_gain_db = ?26
                          WHERE id = ?1",
                     )?
                     .execute(params![
@@ -369,6 +385,7 @@ impl Import<'_> {
                         info.date_added,
                         analysis_dir,
                         self.now,
+                        info.auto_gain_db,
                     ])?;
                 Upserted { id, created: false }
             }
@@ -378,9 +395,10 @@ impl Import<'_> {
                         "INSERT INTO track (uuid, path, title, artist, album, genre, label,
                             remixer, comment, musical_key, bpm, duration_secs, rating, color,
                             file_type, sample_rate, bit_depth, bitrate, file_size, play_count,
-                            year, track_number, date_added, analysis_dir, created_at, updated_at)
+                            year, track_number, date_added, analysis_dir, created_at, updated_at,
+                            auto_gain_db)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?25)",
+                            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?25, ?26)",
                     )?
                     .execute(params![
                         uuid::Uuid::now_v7().to_string(),
@@ -408,6 +426,7 @@ impl Import<'_> {
                         info.date_added,
                         analysis_dir,
                         self.now,
+                        info.auto_gain_db,
                     ])?;
                 Upserted {
                     id: self.tx.last_insert_rowid(),
@@ -556,7 +575,7 @@ impl Import<'_> {
 
 const TRACK_COLUMNS: &str = "id, path, title, artist, album, genre, label, remixer, comment, \
     musical_key, bpm, duration_secs, rating, color, file_type, sample_rate, bit_depth, bitrate, \
-    file_size, play_count, year, track_number, date_added";
+    file_size, play_count, year, track_number, date_added, auto_gain_db";
 
 fn track_from_row(r: &Row) -> rusqlite::Result<Track> {
     Ok(Track {
@@ -590,6 +609,7 @@ fn track_from_row(r: &Row) -> rusqlite::Result<Track> {
             year: r.get(20)?,
             track_number: r.get(21)?,
             date_added: r.get(22)?,
+            auto_gain_db: r.get(23)?,
         },
     })
 }

@@ -33,6 +33,8 @@ CREATE TABLE djmdSongPlaylist (PlaylistID VARCHAR, ContentID VARCHAR, TrackNo IN
     rb_local_deleted INTEGER);
 CREATE TABLE djmdCue (ContentID VARCHAR, Kind INTEGER, InMsec INTEGER, OutMsec INTEGER,
     ColorTableIndex INTEGER, Comment VARCHAR, rb_local_deleted INTEGER);
+CREATE TABLE djmdMixerParam (ContentID VARCHAR, GainHigh INTEGER, GainLow INTEGER,
+    rb_local_deleted INTEGER);
 ";
 
 /// Builds the fake rekordbox folder and returns the path of its master.db.
@@ -82,7 +84,9 @@ fn rekordbox_dir(root: &Path) -> std::path::PathBuf {
            ('1', 4, 280000, 287619, 0, NULL, 0),
            ('1', 0, 16, -1, 0, NULL, 0),
            ('1', 2, 15263, -1, 0, NULL, 1),
-           ('4', 1, 999, -1, 0, NULL, 0);"
+           ('4', 1, 999, -1, 0, NULL, 0);
+         -- Track 1's Auto Gain: 0.5 as float32 (0x3F000000) split in halves.
+         INSERT INTO djmdMixerParam VALUES ('1', 16128, 0, 0);"
     ))
     .unwrap();
     path
@@ -177,6 +181,8 @@ fn imports_a_rekordbox_library() {
     assert_eq!(track.genre.as_deref(), Some("Dance / Pop"));
     assert_eq!(track.play_count, 7, "numbers stored as text still import");
     assert_eq!(track.color, Some(tuneox_core::TrackColor::Green));
+    let gain = track.auto_gain_db.unwrap();
+    assert!((gain - -6.02).abs() < 0.01, "auto gain {gain}");
 
     let cues = lib.cues(bulletproof).unwrap();
     let summary: Vec<(Option<char>, i64, Option<i64>)> = cues

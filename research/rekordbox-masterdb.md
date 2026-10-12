@@ -48,6 +48,10 @@ Observed on rekordbox 7.2.9 (macOS), against a real library of 10,361 tracks. Re
 - `djmdPlaylist.ParentID` is the literal string `root` for top-level playlists. `Seq` orders siblings starting at 1.
 - `djmdProperty.DBID` identifies the library; USB exports carry it as OneLibrary `content.masterDbId`.
 
+## Auto Gain (`djmdMixerParam`)
+
+One row per track (`ContentID`). `GainHigh`/`GainLow` are the high and low 16-bit halves of a float32 **linear** gain; `PeakHigh`/`PeakLow` split a float32 peak amplitude the same way. Decoded, the four TUNEOX-TEST tracks have gains of 0.847 (−1.45 dB, Bulletproof), −2.69, −3.33 and −2.32 dB. Over the 10,361-track library the median is −0.94 dB and 99 % of tracks are below +7.6 dB; the few above +15 dB (up to +38 dB) are short sound effects and sampler one-shots. TuneOx imports the value as `auto_gain_db` unchanged; playback should cap what it applies (rekordbox's A-GAIN knob looks like ±10 dB, see `rekordbox-decks.md`).
+
 ## Cue kinds
 
 | `Kind` | Meaning | Evidence |

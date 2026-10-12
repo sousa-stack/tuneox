@@ -1,4 +1,4 @@
--- TuneOx library schema, version 1.
+-- TuneOx library schema, version 2 (migrations from older versions are in lib.rs).
 -- Positions are microseconds; per-beat tempos are BPM x 100; timestamps are
 -- unix milliseconds.
 
@@ -27,6 +27,7 @@ CREATE TABLE track (
     year          INTEGER,
     track_number  INTEGER,
     date_added    TEXT,
+    auto_gain_db  REAL,
     -- Folder holding this track's analysis files (ANLZ0000.DAT/.EXT/.2EX).
     analysis_dir  TEXT,
     created_at    INTEGER NOT NULL,
