@@ -70,6 +70,10 @@ claude mcp add --scope user tuneox -- tuneox mcp
 
 See [docs/architecture.md](docs/architecture.md).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/status.md](docs/status.md) for what's done and what's next.
+
 ## Prior art
 
 TuneOx stands on years of community reverse-engineering work:
